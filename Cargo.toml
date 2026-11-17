@@ -1,0 +1,50 @@
+[package]
+name = "porin"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rate limiting for Rust services: several algorithms, shared storage, any framework"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/YabetsZ/porin"
+readme = "README.md"
+keywords = ["rate-limit", "ratelimit", "distributed", "redis", "tower"]
+categories = ["network-programming", "web-programming", "concurrency"]
+
+[features]
+default = ["memory"]
+memory = []
+redis-tokio = []
+redis-smol = []
+blocking = []
+tower = []
+axum = ["tower"]
+peer = []
+
+[dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(docsrs)"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
