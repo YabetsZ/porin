@@ -34,7 +34,7 @@ missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 unused_must_use = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(docsrs)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(docsrs)", "cfg(porin_bench)"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -51,8 +51,14 @@ print_stdout = "warn"
 print_stderr = "warn"
 
 [dev-dependencies]
+divan = "0.1.21"
+governor = "0.10.4"
 proptest = "1.11.0"
 trybuild = "1.0.119"
+
+[[bench]]
+name = "memory"
+harness = false
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"

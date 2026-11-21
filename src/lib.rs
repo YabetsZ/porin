@@ -21,11 +21,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod algorithm;
+#[cfg(porin_bench)]
+#[doc(hidden)]
+pub mod bench;
 pub mod clock;
 pub mod key;
 pub mod quota;
 #[cfg_attr(
-    any(not(test), loom),
+    all(any(not(test), loom), not(porin_bench)),
     expect(
         dead_code,
         reason = "nothing public uses the stores yet; the limiter will"
