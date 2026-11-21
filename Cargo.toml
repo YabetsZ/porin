@@ -64,5 +64,9 @@ trybuild = "1.0.119"
 name = "memory"
 harness = false
 
+[[bench]]
+name = "compare"
+harness = false
+
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
