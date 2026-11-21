@@ -18,3 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Decision`, `Stats` and `Denial`, including the exact `retry_after` and whether a refusal came from a full store.
 - `max_keys` (default 1,000,000) and `WhenFull`: refuse new keys (default), evict the key nearest to idle within a window, or share an overflow quota.
 - `until_ready` and `until_ready_n`, which wait for the exact moment a hit fits, on any async runtime.
+- `blocking::Limiter` (feature `blocking`) for code without an async runtime. It shares state with the async `Limiter` it converts from.

@@ -31,6 +31,9 @@ mod algorithm;
 #[cfg(porin_bench)]
 #[doc(hidden)]
 pub mod bench;
+#[cfg(feature = "blocking")]
+#[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
+pub mod blocking;
 pub mod clock;
 pub mod key;
 mod limiter;
