@@ -27,8 +27,12 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg_attr(
+    not(feature = "memory"),
+    expect(dead_code, reason = "only the memory store runs the algorithms so far")
+)]
 mod algorithm;
-#[cfg(porin_bench)]
+#[cfg(all(porin_bench, feature = "memory"))]
 #[doc(hidden)]
 pub mod bench;
 #[cfg(feature = "blocking")]
@@ -36,9 +40,12 @@ pub mod bench;
 pub mod blocking;
 pub mod clock;
 pub mod key;
+#[cfg(feature = "memory")]
 mod limiter;
 pub mod quota;
+#[cfg(feature = "memory")]
 mod store;
+#[cfg(feature = "memory")]
 mod sync;
 
 pub use algorithm::fixed_window::FixedWindow;
@@ -49,8 +56,10 @@ pub use algorithm::sliding_window::SlidingWindow;
 pub use clock::QuantaClock;
 pub use clock::{Clock, CoarseClock, ManualClock, MonotonicClock, Timestamp};
 pub use key::KeyEncode;
+#[cfg(feature = "memory")]
 pub use limiter::{Algorithm, Builder, Decision, Denial, Error, Limiter, NoQuota, Stats};
 pub use quota::{Quota, QuotaError, QuotaErrorKind, Rate};
+#[cfg(feature = "memory")]
 pub use store::WhenFull;
 
 /// A leaky bucket used as a meter allows exactly what a token bucket does,

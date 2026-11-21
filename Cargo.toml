@@ -12,18 +12,13 @@ categories = ["network-programming", "web-programming", "concurrency"]
 
 [features]
 default = ["memory"]
-memory = []
-redis-tokio = []
-redis-smol = []
-blocking = []
-tower = []
-axum = ["tower"]
-peer = []
+memory = ["dep:futures-timer", "dep:hashbrown"]
+blocking = ["memory"]
 quanta = ["dep:quanta"]
 
 [dependencies]
-futures-timer = "3.0.4"
-hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
+futures-timer = { version = "3.0.4", optional = true }
+hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"], optional = true }
 quanta = { version = "0.12.6", optional = true }
 
 [package.metadata.docs.rs]
@@ -63,10 +58,12 @@ trybuild = "1.0.119"
 [[bench]]
 name = "memory"
 harness = false
+required-features = ["memory"]
 
 [[bench]]
 name = "compare"
 harness = false
+required-features = ["memory"]
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"

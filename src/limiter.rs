@@ -77,6 +77,7 @@ impl std::error::Error for Error {}
 /// # Ok::<(), porin::Error>(())
 /// # }).unwrap();
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
 pub struct Limiter<K, A: Algorithm = TokenBucket> {
     inner: Arc<Inner<K, A>>,
 }

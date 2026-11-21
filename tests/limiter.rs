@@ -1,4 +1,5 @@
 //! The public `Limiter` API, driven by a manual clock.
+#![cfg(feature = "memory")]
 
 use std::num::NonZeroUsize;
 use std::time::Duration;
