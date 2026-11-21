@@ -28,7 +28,7 @@ use hashbrown::HashTable;
 use self::slot::Slot;
 pub(crate) use self::slot::Stored;
 use super::{Hit, WhenFull};
-use crate::algorithm::Outcome;
+use crate::algorithm::{Outcome, Retry};
 use crate::quota::MAX_RATES;
 use crate::sync::{AtomicU64, Mutex, RwLock};
 use crate::{Quota, Timestamp};
@@ -55,7 +55,7 @@ pub(crate) struct MemoryStore<K, A: Stored, const N: usize = MAX_RATES> {
     when_full: WhenFull,
     /// The shared state for [`WhenFull::Overflow`].
     overflow: Option<Mutex<A::Slot<N>>>,
-    /// New keys that found their shard full of active keys.
+    /// Hits from untracked keys that found their shard full of active keys.
     full_hits: AtomicU64,
 }
 
@@ -167,8 +167,10 @@ impl<K: Hash + Eq, A: Stored, const N: usize> MemoryStore<K, A, N> {
         }
 
         // A panic while holding the write lock can only come from a user
-        // `Hash` or `Eq` impl during lookup, before any state changes, so
-        // the data is still consistent and the poison can be ignored.
+        // `Hash`, `Eq` or `ToOwned` impl. At each of those points the slots
+        // are consistent; at worst one expiry item is lost or left without
+        // an entry, which delays an eviction but can't cause a wrong one.
+        // So the poison can be ignored.
         let mut shard = lock.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = shard
             .entries
@@ -199,13 +201,26 @@ impl<K: Hash + Eq, A: Stored, const N: usize> MemoryStore<K, A, N> {
             }
             let retry_after = Duration::from_nanos(shard.next_idle().saturating_sub(now_nanos));
             drop(shard);
-            return match (&self.overflow, self.when_full) {
-                (Some(overflow), WhenFull::Overflow(overflow_quota)) => overflow
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .hit(&overflow_quota, now, cost)
-                    .into(),
-                _ => Hit::Full { retry_after },
+            let (Some(overflow), WhenFull::Overflow(overflow_quota)) =
+                (&self.overflow, self.when_full)
+            else {
+                return Hit::Full { retry_after };
+            };
+            let outcome = overflow.lock().unwrap_or_else(PoisonError::into_inner).hit(
+                &overflow_quota,
+                now,
+                cost,
+            );
+            // A denial is still the store being full: the key could also
+            // get in once a slot frees, whichever comes first.
+            return match outcome {
+                Outcome::Allowed(stats) => Hit::Allowed(stats),
+                Outcome::Denied { retry, .. } => Hit::Full {
+                    retry_after: match retry {
+                        Retry::After(wait) => wait.min(retry_after),
+                        Retry::Never => retry_after,
+                    },
+                },
             };
         }
         self.insert(&mut shard, hash, key, slot, outcome)
@@ -282,8 +297,8 @@ impl<K: Hash + Eq, A: Stored, const N: usize> MemoryStore<K, A, N> {
         }
     }
 
-    /// New keys so far that found their shard full of active keys, whatever
-    /// the [`WhenFull`] policy then did with them.
+    /// Hits so far from untracked keys that found their shard full of
+    /// active keys, whatever the [`WhenFull`] policy then did with them.
     pub(crate) fn full_hits(&self) -> u64 {
         self.full_hits.load(Ordering::Relaxed)
     }

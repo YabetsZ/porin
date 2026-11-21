@@ -253,3 +253,31 @@ fn until_ready_returns_at_once_when_the_cost_never_fits() {
         assert_eq!(denial.retry_after(), None);
     });
 }
+
+#[test]
+fn an_overflow_denial_is_a_store_full_denial_with_a_retry_time() {
+    let clock = ManualClock::new();
+    let limiter: Limiter<u64> = Limiter::builder()
+        .quota(quota!("5/second"))
+        .max_keys(max_keys(1))
+        .when_full(WhenFull::Overflow(quota!("1/second")))
+        .clock(clock.clone())
+        .build();
+    block_on(async {
+        assert!(allowed(limiter.hit(&1).await));
+        assert!(allowed(limiter.hit(&2).await), "the overflow's one unit");
+        let Ok(Decision::Denied(denial)) = limiter.hit(&3).await else {
+            panic!("the overflow is spent");
+        };
+        assert!(denial.is_store_full());
+        assert_eq!(denial.retry_after(), Some(Duration::from_millis(200)));
+        let Ok(Decision::Denied(denial)) = limiter.hit_n(&3, 2).await else {
+            panic!("2 units never fit the overflow's burst of 1");
+        };
+        assert_eq!(
+            denial.retry_after(),
+            Some(Duration::from_millis(200)),
+            "but key 1 goes idle in 200 ms and frees its slot"
+        );
+    });
+}

@@ -173,8 +173,8 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
         self.inner.quota()
     }
 
-    /// How many new keys so far found the store full of active keys. See
-    /// [`crate::Limiter::full_hits`].
+    /// How many hits so far came from keys the store had no room to track.
+    /// See [`crate::Limiter::full_hits`].
     #[must_use]
     pub fn full_hits(&self) -> u64 {
         self.inner.full_hits()

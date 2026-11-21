@@ -428,13 +428,13 @@ fn overflow_counts_new_keys_against_one_shared_quota() {
     assert!(allowed(store.hit(&quota, &1, at(0), 1)));
     assert!(allowed(store.hit(&quota, &2, at(0), 1)), "overflow: 1 of 2");
     assert!(allowed(store.hit(&quota, &3, at(0), 1)), "overflow: 2 of 2");
-    assert!(matches!(
+    assert_eq!(
         store.hit(&quota, &4, at(0), 1),
-        Hit::Denied {
-            retry: Retry::After(_),
-            ..
-        }
-    ));
+        Hit::Full {
+            retry_after: Duration::from_millis(500)
+        },
+        "the overflow refills in 500 ms, before key 1 goes idle at 1 s"
+    );
     assert!(
         !allowed(store.hit(&quota, &1, at(0), 1)),
         "the known key keeps its own limit"

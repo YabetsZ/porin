@@ -17,9 +17,11 @@ use crate::algorithm::{Outcome, Retry, Stats};
 ///
 /// use porin::{Limiter, WhenFull, quota};
 ///
+/// // Each user gets 100 a minute. If a flood of new users fills the store,
+/// // all the users it can't track share 20 a second between them.
 /// let limiter: Limiter<u64> = Limiter::builder()
 ///     .quota(quota!("100/minute"))
-///     .when_full(WhenFull::Overflow(quota!("1000/second")))
+///     .when_full(WhenFull::Overflow(quota!("20/second")))
 ///     .build();
 /// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,8 +38,16 @@ pub enum WhenFull {
         /// How close to idle a key must be to be forgotten.
         within: Duration,
     },
-    /// Count new keys that don't fit against this one shared quota. Never
-    /// over-admits beyond it, but those keys share one limit.
+    /// Count every new key that doesn't fit against this one shared quota.
+    ///
+    /// The store can't track those keys, so their own quota doesn't apply:
+    /// the shared quota is their only limit, and a single key may use all
+    /// of it. Keep it small, sized for the total you can afford to serve
+    /// untracked clients, not for one client. Their denials report
+    /// [`Denial::is_store_full`](crate::Denial::is_store_full). A key whose
+    /// slot frees up later starts with its full own quota.
+    ///
+    /// Entries are sized for the larger of the two quotas' rate counts.
     Overflow(Quota),
 }
 

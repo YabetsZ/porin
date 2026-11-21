@@ -318,9 +318,10 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
         &self.inner.quota
     }
 
-    /// How many new keys so far found the store full of active keys,
-    /// whatever the [`WhenFull`] policy then did. Worth alerting on: it
-    /// means [`Builder::max_keys`] is too low or a flood of keys is arriving.
+    /// How many hits so far came from keys the store had no room to track,
+    /// whatever the [`WhenFull`] policy then did with them. A key keeps
+    /// adding one per hit until it gets a slot. Worth alerting on: it means
+    /// [`Builder::max_keys`] is too low or a flood of keys is arriving.
     #[must_use]
     pub fn full_hits(&self) -> u64 {
         with_store!(&self.inner.store, store => store.full_hits())
