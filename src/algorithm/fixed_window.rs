@@ -4,8 +4,7 @@
 //! and again at the start of the next, so up to twice the limit can pass
 //! within a short span around a boundary.
 
-use super::{Algorithm, Check, Retry, Stats, nanos, window_start};
-use crate::{Rate, Timestamp};
+use super::{Algorithm, Check, Retry, Spec, Stats, window_start};
 
 /// Fixed window: counts hits in windows aligned to the period, such as each
 /// whole minute, and resets the count when a new window starts.
@@ -26,15 +25,14 @@ impl Algorithm for FixedWindow {
     type State = FixedWindowState;
     type Commit = FixedWindowState;
 
-    fn check(
-        rate: Rate,
+    fn check_ticks(
+        spec: Spec,
         state: &FixedWindowState,
-        now: Timestamp,
+        now: u64,
         cost: u32,
     ) -> Check<FixedWindowState> {
-        let now = now.as_nanos();
-        let period = rate.period_nanos();
-        let limit = rate.count().get();
+        let period = spec.period;
+        let limit = spec.count;
 
         // A later window starts empty. If the clock went backwards into an
         // earlier window, the stored window and its count are kept, which
@@ -45,11 +43,15 @@ impl Algorithm for FixedWindow {
         } else {
             (state.start, state.used)
         };
-        let window_end = nanos(start.saturating_add(period).saturating_sub(now));
+        let window_end = spec.duration(start.saturating_add(period).saturating_sub(now));
         let report = |used: u32| Stats {
             remaining: limit.saturating_sub(used),
             // Nothing spent in this window means nothing to reset.
-            reset_after: if used == 0 { nanos(0) } else { window_end },
+            reset_after: if used == 0 {
+                spec.duration(0)
+            } else {
+                window_end
+            },
         };
 
         if cost > limit {
@@ -74,17 +76,18 @@ impl Algorithm for FixedWindow {
         *state = commit;
     }
 
-    fn idle_at(rate: Rate, state: &FixedWindowState) -> u64 {
+    fn idle_at_ticks(spec: Spec, state: &FixedWindowState) -> u64 {
         if state.used == 0 {
             0
         } else {
-            state.start.saturating_add(rate.period_nanos())
+            state.start.saturating_add(spec.period)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{Rate, Timestamp};
     use std::num::NonZeroU32;
     use std::time::Duration;
 

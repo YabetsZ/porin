@@ -11,8 +11,7 @@
 //! the exact rate, never faster, and a full burst fits however it is split
 //! into hits. Rates finer than one token per nanosecond are capped there.
 
-use super::{Algorithm, Check, Retry, Stats, nanos};
-use crate::{Rate, Timestamp};
+use super::{Algorithm, Check, Retry, Spec, Stats};
 
 /// Token bucket: allows bursts up to the rate's burst size, then refills
 /// steadily at the rate. The default algorithm.
@@ -49,9 +48,8 @@ impl Algorithm for TokenBucket {
     type State = GcraState;
     type Commit = GcraState;
 
-    fn check(rate: Rate, state: &GcraState, now: Timestamp, cost: u32) -> Check<GcraState> {
-        let now = now.as_nanos();
-        let bucket = Bucket::new(rate);
+    fn check_ticks(spec: Spec, state: &GcraState, now: u64, cost: u32) -> Check<GcraState> {
+        let bucket = Bucket::new(spec);
         // If the clock went backwards, the stored TAT is kept: the bucket
         // looks emptier than it is, which under-admits.
         let tat = state.tat.max(now);
@@ -82,7 +80,7 @@ impl Algorithm for TokenBucket {
             let wait = allow_at.saturating_sub(u128::from(now));
             Check::Denied {
                 stats: bucket.stats(now, tat),
-                retry: Retry::After(nanos(u64::try_from(wait).unwrap_or(u64::MAX))),
+                retry: Retry::After(spec.duration(u64::try_from(wait).unwrap_or(u64::MAX))),
             }
         }
     }
@@ -91,13 +89,14 @@ impl Algorithm for TokenBucket {
         *state = commit;
     }
 
-    fn idle_at(_: Rate, state: &GcraState) -> u64 {
+    fn idle_at_ticks(_: Spec, state: &GcraState) -> u64 {
         state.idle_at()
     }
 }
 
 struct Bucket {
-    /// Nanoseconds to refill one token, rounded up. At least 1.
+    spec: Spec,
+    /// Ticks to refill one token, rounded up. At least 1.
     interval: u64,
     burst: u32,
     /// How far the TAT may run ahead of now: the refill time of a full
@@ -106,13 +105,11 @@ struct Bucket {
 }
 
 impl Bucket {
-    fn new(rate: Rate) -> Self {
-        let interval = rate
-            .period_nanos()
-            .div_ceil(u64::from(rate.count().get()))
-            .max(1);
-        let burst = rate.burst().get();
+    fn new(spec: Spec) -> Self {
+        let interval = spec.period.div_ceil(u64::from(spec.count)).max(1);
+        let burst = spec.burst;
         Self {
+            spec,
             interval,
             burst,
             tolerance: u128::from(interval).saturating_mul(u128::from(burst)),
@@ -134,13 +131,14 @@ impl Bucket {
             .min(self.burst);
         Stats {
             remaining,
-            reset_after: nanos(tat.saturating_sub(now)),
+            reset_after: self.spec.duration(tat.saturating_sub(now)),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{Rate, Timestamp};
     use std::num::NonZeroU32;
     use std::time::Duration;
 

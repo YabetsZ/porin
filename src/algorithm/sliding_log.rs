@@ -6,8 +6,7 @@
 
 use std::collections::VecDeque;
 
-use super::{Algorithm, Check, Retry, Stats, nanos};
-use crate::{Rate, Timestamp};
+use super::{Algorithm, Check, Retry, Spec, Stats};
 
 /// Sliding log: remembers the time of every unit spent in the last period
 /// and allows a hit only if the period holds room for it. Exact, but keeps
@@ -35,15 +34,14 @@ impl Algorithm for SlidingLog {
     type State = SlidingLogState;
     type Commit = SlidingLogCommit;
 
-    fn check(
-        rate: Rate,
+    fn check_ticks(
+        spec: Spec,
         state: &SlidingLogState,
-        now: Timestamp,
+        now: u64,
         cost: u32,
     ) -> Check<SlidingLogCommit> {
-        let now = now.as_nanos();
-        let period = rate.period_nanos();
-        let limit = rate.count().get();
+        let period = spec.period;
+        let limit = spec.count;
 
         // A hit at time t counts while now < t + period.
         let is_live = |time: u64| time.saturating_add(period) > now;
@@ -59,10 +57,11 @@ impl Algorithm for SlidingLog {
             .fold(0_u32, |sum, (_, cost)| sum.saturating_add(*cost));
         let used = state.total.saturating_sub(expired_cost);
         let live = || state.entries.iter().skip(expired);
-        let until_expiry = |time: u64| nanos(time.saturating_add(period).saturating_sub(now));
+        let until_expiry =
+            |time: u64| spec.duration(time.saturating_add(period).saturating_sub(now));
         let reset_after = live()
             .last()
-            .map_or(nanos(0), |(time, _)| until_expiry(*time));
+            .map_or(spec.duration(0), |(time, _)| until_expiry(*time));
 
         if cost > limit {
             return Check::Denied {
@@ -78,7 +77,11 @@ impl Algorithm for SlidingLog {
                 commit: SlidingLogCommit { now, cost, expired },
                 stats: Stats {
                     remaining: limit.saturating_sub(total),
-                    reset_after: if cost > 0 { nanos(period) } else { reset_after },
+                    reset_after: if cost > 0 {
+                        spec.duration(period)
+                    } else {
+                        reset_after
+                    },
                 },
             },
             _ => {
@@ -122,16 +125,17 @@ impl Algorithm for SlidingLog {
     }
 
     /// The newest entry is the last to leave the window.
-    fn idle_at(rate: Rate, state: &SlidingLogState) -> u64 {
+    fn idle_at_ticks(spec: Spec, state: &SlidingLogState) -> u64 {
         state
             .entries
             .back()
-            .map_or(0, |(time, _)| time.saturating_add(rate.period_nanos()))
+            .map_or(0, |(time, _)| time.saturating_add(spec.period))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{Rate, Timestamp};
     use std::num::NonZeroU32;
     use std::time::Duration;
 

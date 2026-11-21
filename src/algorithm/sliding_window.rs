@@ -12,9 +12,8 @@
 //! weighted part is rounded up, which errs towards denying.
 
 use super::{
-    Algorithm, Check, Retry, Stats, mul_div_ceil, mul_div_floor, nanos, saturate, window_start,
+    Algorithm, Check, Retry, Spec, Stats, mul_div_ceil, mul_div_floor, saturate, window_start,
 };
-use crate::{Rate, Timestamp};
 
 /// Sliding window counter: weights the previous window's count by how much
 /// of it still overlaps the last period. Smooths fixed window's edge burst
@@ -34,15 +33,14 @@ impl Algorithm for SlidingWindow {
     type State = SlidingWindowState;
     type Commit = SlidingWindowState;
 
-    fn check(
-        rate: Rate,
+    fn check_ticks(
+        spec: Spec,
         state: &SlidingWindowState,
-        now: Timestamp,
+        now: u64,
         cost: u32,
     ) -> Check<SlidingWindowState> {
-        let now = now.as_nanos();
-        let period = rate.period_nanos();
-        let limit = rate.count().get();
+        let period = spec.period;
+        let limit = spec.count;
         let window = roll(*state, window_start(now, period), period);
 
         // Time left in the current window. If the clock went backwards into
@@ -55,11 +53,11 @@ impl Algorithm for SlidingWindow {
             .min(period);
         let estimate = weighted(window.previous, left, period).saturating_add(window.current);
         let reset_after = if window.current > 0 {
-            nanos(left.saturating_add(period))
+            spec.duration(left.saturating_add(period))
         } else if window.previous > 0 {
-            nanos(left)
+            spec.duration(left)
         } else {
-            nanos(0)
+            spec.duration(0)
         };
         let report = |estimate: u32| Stats {
             remaining: limit.saturating_sub(estimate),
@@ -84,7 +82,7 @@ impl Algorithm for SlidingWindow {
                         remaining: limit.saturating_sub(total),
                         // A hit puts units in the current window.
                         reset_after: if cost > 0 {
-                            nanos(left.saturating_add(period))
+                            spec.duration(left.saturating_add(period))
                         } else {
                             reset_after
                         },
@@ -93,7 +91,7 @@ impl Algorithm for SlidingWindow {
             }
             _ => Check::Denied {
                 stats: report(estimate),
-                retry: Retry::After(nanos(retry_after(window, left, period, limit, cost))),
+                retry: Retry::After(spec.duration(retry_after(window, left, period, limit, cost))),
             },
         }
     }
@@ -105,8 +103,8 @@ impl Algorithm for SlidingWindow {
     /// The current window's count weighs on the estimate until a whole
     /// period after that window ends; the previous one's until the current
     /// window ends.
-    fn idle_at(rate: Rate, state: &SlidingWindowState) -> u64 {
-        let period = rate.period_nanos();
+    fn idle_at_ticks(spec: Spec, state: &SlidingWindowState) -> u64 {
+        let period = spec.period;
         if state.current > 0 {
             state.start.saturating_add(period.saturating_mul(2))
         } else if state.previous > 0 {
@@ -178,6 +176,7 @@ fn retry_after(window: SlidingWindowState, left: u64, period: u64, limit: u32, c
 
 #[cfg(test)]
 mod tests {
+    use crate::{Rate, Timestamp};
     use std::num::NonZeroU32;
     use std::time::Duration;
 

@@ -25,8 +25,14 @@ pub(crate) trait Algorithm {
     type Commit;
 
     /// Checks whether `cost` units may be spent at `now`, without changing
-    /// anything. A cost of 0 asks for the current stats.
-    fn check(rate: Rate, state: &Self::State, now: Timestamp, cost: u32) -> Check<Self::Commit>;
+    /// anything. A cost of 0 asks for the current stats. Times are in
+    /// `spec`'s ticks.
+    fn check_ticks(spec: Spec, state: &Self::State, now: u64, cost: u32) -> Check<Self::Commit>;
+
+    /// [`Algorithm::check_ticks`] in nanoseconds, the unit of [`Timestamp`].
+    fn check(rate: Rate, state: &Self::State, now: Timestamp, cost: u32) -> Check<Self::Commit> {
+        Self::check_ticks(Spec::new(rate, Unit::Nanos), state, now.as_nanos(), cost)
+    }
 
     /// Records an allowed hit. `commit` must come from [`Algorithm::check`]
     /// on this same, unchanged state.
@@ -35,8 +41,60 @@ pub(crate) trait Algorithm {
     /// The time from which `state` decides exactly like a never-hit state,
     /// for every later time, if nothing more is recorded. Taken from what
     /// the state stores, never from the caller's clock, so a hit recorded
-    /// with an older timestamp can't make a key look idle early.
-    fn idle_at(rate: Rate, state: &Self::State) -> u64;
+    /// with an older timestamp can't make a key look idle early. In
+    /// `spec`'s ticks.
+    fn idle_at_ticks(spec: Spec, state: &Self::State) -> u64;
+
+    /// [`Algorithm::idle_at_ticks`] in nanoseconds.
+    fn idle_at(rate: Rate, state: &Self::State) -> u64 {
+        Self::idle_at_ticks(Spec::new(rate, Unit::Nanos), state)
+    }
+}
+
+/// The unit an algorithm counts time in. The library runs in nanoseconds;
+/// the Redis scripts run in microseconds, because Lua numbers are doubles,
+/// and their tests compare against this same code run in microseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unit {
+    Nanos,
+    #[cfg_attr(
+        feature = "memory",
+        expect(dead_code, reason = "for the Redis store, which counts in microseconds")
+    )]
+    Micros,
+}
+
+/// One rate in a unit's ticks.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Spec {
+    pub(crate) period: u64,
+    pub(crate) count: u32,
+    pub(crate) burst: u32,
+    unit: Unit,
+}
+
+impl Spec {
+    pub(crate) const fn new(rate: Rate, unit: Unit) -> Self {
+        let nanos = rate.period_nanos();
+        Self {
+            period: match unit {
+                Unit::Nanos => nanos,
+                // Periods are whole milliseconds, so this is exact.
+                Unit::Micros => nanos / 1_000,
+            },
+            count: rate.count().get(),
+            burst: rate.burst().get(),
+            unit,
+        }
+    }
+
+    /// `ticks` of this spec's unit as a duration.
+    pub(crate) const fn duration(self, ticks: u64) -> Duration {
+        match self.unit {
+            Unit::Nanos => Duration::from_nanos(ticks),
+            Unit::Micros => Duration::from_micros(ticks),
+        }
+    }
 }
 
 /// The answer for one rate.
@@ -110,12 +168,23 @@ pub(crate) fn check_quota<A: Algorithm, const N: usize>(
     now: Timestamp,
     cost: u32,
 ) -> (Outcome, [Option<A::Commit>; N]) {
+    check_quota_in::<A, N>(quota, Unit::Nanos, states, now.as_nanos(), cost)
+}
+
+/// [`check_quota`] with time in `unit`'s ticks.
+pub(crate) fn check_quota_in<A: Algorithm, const N: usize>(
+    quota: &Quota,
+    unit: Unit,
+    states: &[A::State; N],
+    now: u64,
+    cost: u32,
+) -> (Outcome, [Option<A::Commit>; N]) {
     let rates = quota.rates();
     let mut commits: [Option<A::Commit>; N] = std::array::from_fn(|_| None);
     let mut summary = Stats::UNLIMITED;
     let mut retry = None;
     for ((rate, state), slot) in rates.iter().zip(states.iter()).zip(commits.iter_mut()) {
-        match A::check(*rate, state, now, cost) {
+        match A::check_ticks(Spec::new(*rate, unit), state, now, cost) {
             Check::Allowed {
                 commit,
                 stats: rate_stats,
@@ -136,12 +205,13 @@ pub(crate) fn check_quota<A: Algorithm, const N: usize>(
     };
     // Allowed rates reported stats as if the hit were recorded. It isn't,
     // so report what every rate has without it.
-    let unchanged = rates
-        .iter()
-        .zip(states.iter())
-        .fold(Stats::UNLIMITED, |summary, (rate, state)| {
-            summary.tightest(peek_stats::<A>(*rate, state, now))
-        });
+    let unchanged =
+        rates
+            .iter()
+            .zip(states.iter())
+            .fold(Stats::UNLIMITED, |summary, (rate, state)| {
+                summary.tightest(peek_stats::<A>(Spec::new(*rate, unit), state, now))
+            });
     let denied = Outcome::Denied {
         stats: unchanged,
         retry,
@@ -149,8 +219,8 @@ pub(crate) fn check_quota<A: Algorithm, const N: usize>(
     (denied, std::array::from_fn(|_| None))
 }
 
-fn peek_stats<A: Algorithm>(rate: Rate, state: &A::State, now: Timestamp) -> Stats {
-    match A::check(rate, state, now, 0) {
+fn peek_stats<A: Algorithm>(spec: Spec, state: &A::State, now: u64) -> Stats {
+    match A::check_ticks(spec, state, now, 0) {
         Check::Allowed { stats, .. } | Check::Denied { stats, .. } => stats,
     }
 }
@@ -205,8 +275,4 @@ fn saturate(value: u128) -> u64 {
 /// The start of the period-aligned window that contains `now`.
 fn window_start(now: u64, period: u64) -> u64 {
     now.saturating_sub(now.checked_rem(period).unwrap_or(0))
-}
-
-fn nanos(nanos: u64) -> Duration {
-    Duration::from_nanos(nanos)
 }
