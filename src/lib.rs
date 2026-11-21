@@ -20,6 +20,14 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no store calls the algorithms yet; the in-memory store will"
+    )
+)]
+mod algorithm;
 pub mod clock;
 pub mod quota;
 

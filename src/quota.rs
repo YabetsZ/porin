@@ -137,6 +137,11 @@ impl Rate {
         Duration::from_millis(self.period_ms)
     }
 
+    /// The period in nanoseconds. At most 10,000 days, so it can't overflow.
+    pub(crate) const fn period_nanos(self) -> u64 {
+        self.period_ms.saturating_mul(1_000_000)
+    }
+
     const fn from_parts(count: NonZeroU32, period_ms: u64) -> Self {
         Self {
             count,

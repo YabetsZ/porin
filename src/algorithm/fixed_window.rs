@@ -1,0 +1,134 @@
+//! Fixed window: count hits in period-aligned windows.
+//!
+//! Cheapest of all, but a key can spend its limit at the end of one window
+//! and again at the start of the next, so up to twice the limit can pass
+//! within a short span around a boundary.
+
+use super::{Algorithm, Check, Retry, Stats, nanos, window_start};
+use crate::{Rate, Timestamp};
+
+#[derive(Debug)]
+pub(crate) struct FixedWindow;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FixedWindowState {
+    /// Nanoseconds, aligned to the period.
+    start: u64,
+    used: u32,
+}
+
+impl Algorithm for FixedWindow {
+    type State = FixedWindowState;
+    type Commit = FixedWindowState;
+
+    fn check(
+        rate: Rate,
+        state: &FixedWindowState,
+        now: Timestamp,
+        cost: u32,
+    ) -> Check<FixedWindowState> {
+        let now = now.as_nanos();
+        let period = rate.period_nanos();
+        let limit = rate.count().get();
+
+        // A later window starts empty. If the clock went backwards into an
+        // earlier window, the stored window and its count are kept, which
+        // under-admits.
+        let current = window_start(now, period);
+        let (start, used) = if current > state.start {
+            (current, 0)
+        } else {
+            (state.start, state.used)
+        };
+        let window_end = nanos(start.saturating_add(period).saturating_sub(now));
+        let report = |used: u32| Stats {
+            remaining: limit.saturating_sub(used),
+            // Nothing spent in this window means nothing to reset.
+            reset_after: if used == 0 { nanos(0) } else { window_end },
+        };
+
+        if cost > limit {
+            return Check::Denied {
+                stats: report(used),
+                retry: Retry::Never,
+            };
+        }
+        match used.checked_add(cost) {
+            Some(total) if total <= limit => Check::Allowed {
+                commit: FixedWindowState { start, used: total },
+                stats: report(total),
+            },
+            _ => Check::Denied {
+                stats: report(used),
+                retry: Retry::After(window_end),
+            },
+        }
+    }
+
+    fn commit(state: &mut FixedWindowState, commit: FixedWindowState) {
+        *state = commit;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn per_second(count: u32) -> Rate {
+        Rate::per_second(NonZeroU32::new(count).unwrap())
+    }
+
+    fn at(millis: u64) -> Timestamp {
+        Timestamp::ZERO.saturating_add(Duration::from_millis(millis))
+    }
+
+    fn hit(rate: Rate, state: &mut FixedWindowState, now: Timestamp, cost: u32) -> bool {
+        match FixedWindow::check(rate, state, now, cost) {
+            Check::Allowed { commit, .. } => {
+                FixedWindow::commit(state, commit);
+                true
+            }
+            Check::Denied { .. } => false,
+        }
+    }
+
+    #[test]
+    fn edge_burst_admits_twice_the_limit_across_a_boundary() {
+        let rate = per_second(3);
+        let mut state = FixedWindowState::default();
+        let admitted =
+            [999, 999, 999, 1_000, 1_000, 1_000, 1_000].map(|ms| hit(rate, &mut state, at(ms), 1));
+        assert_eq!(admitted, [true, true, true, true, true, true, false]);
+    }
+
+    #[test]
+    fn denial_waits_for_the_window_end() {
+        let rate = per_second(1);
+        let mut state = FixedWindowState::default();
+        assert!(hit(rate, &mut state, at(1_250), 1));
+        assert_eq!(
+            FixedWindow::check(rate, &state, at(1_250), 1),
+            Check::Denied {
+                stats: Stats {
+                    remaining: 0,
+                    reset_after: Duration::from_millis(750)
+                },
+                retry: Retry::After(Duration::from_millis(750)),
+            }
+        );
+    }
+
+    #[test]
+    fn clock_going_backwards_keeps_the_later_window() {
+        let rate = per_second(2);
+        let mut state = FixedWindowState::default();
+        assert!(hit(rate, &mut state, at(5_100), 2));
+        assert!(
+            !hit(rate, &mut state, at(4_900), 1),
+            "earlier window must not reset the count"
+        );
+    }
+}
