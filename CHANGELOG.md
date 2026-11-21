@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] - 2026-11-21
+
+First release, to reserve the name. The in-memory limiter is usable; the API may still change before 0.1.0.
+
 ### Added
 
 - `Quota` and `Rate`: up to four limits per quota, with optional token bucket bursts.
@@ -22,3 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `until_ready` and `until_ready_n`, which wait for the exact moment a hit fits, on any async runtime.
 - Feature `memory` (on by default) for the in-memory limiter; without it only quotas, clocks and keys remain.
 - `blocking::Limiter` (feature `blocking`) for code without an async runtime. It shares state with the async `Limiter` it converts from.
+
+[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.1]: https://github.com/YabetsZ/porin/releases/tag/v0.1.0-alpha.1
