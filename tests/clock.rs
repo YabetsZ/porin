@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use porin::{Clock, ManualClock, MonotonicClock, Timestamp};
+use porin::{Clock, CoarseClock, ManualClock, MonotonicClock, Timestamp};
 
 #[test]
 fn manual_clock_moves_only_when_told() {
@@ -76,4 +76,44 @@ fn timestamp_arithmetic_saturates() {
         late.saturating_duration_since(early),
         Duration::from_nanos(u64::MAX - 10)
     );
+}
+
+#[test]
+fn coarse_clock_advances_by_ticks_and_never_goes_backwards() {
+    let clock = CoarseClock::new(Duration::from_millis(1)).unwrap();
+    let start = clock.now();
+    let mut previous = start;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while clock.now() < start.saturating_add(Duration::from_millis(5)) {
+        assert!(std::time::Instant::now() < deadline, "the ticker stopped");
+        let now = clock.now();
+        assert!(now >= previous, "{now:?} < {previous:?}");
+        previous = now;
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn coarse_clock_clones_share_time_and_short_ticks_are_raised() {
+    let clock = CoarseClock::new(Duration::ZERO).unwrap();
+    let clone = clock.clone();
+    std::thread::sleep(CoarseClock::MIN_TICK * 20);
+    let (a, b) = (clock.now(), clone.now());
+    assert!(a > Timestamp::ZERO, "the ticker never ran");
+    assert!(b.saturating_duration_since(a) < Duration::from_millis(50));
+}
+
+#[cfg(feature = "quanta")]
+#[test]
+fn quanta_clock_moves_forward() {
+    let clock = porin::QuantaClock::new();
+    let start = clock.now();
+    let mut previous = start;
+    for _ in 0..1_000 {
+        let now = clock.now();
+        assert!(now >= previous, "{now:?} < {previous:?}");
+        previous = now;
+    }
+    std::thread::sleep(Duration::from_millis(2));
+    assert!(clock.now().saturating_duration_since(start) >= Duration::from_millis(1));
 }

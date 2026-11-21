@@ -45,7 +45,9 @@ pub use algorithm::fixed_window::FixedWindow;
 pub use algorithm::gcra::TokenBucket;
 pub use algorithm::sliding_log::SlidingLog;
 pub use algorithm::sliding_window::SlidingWindow;
-pub use clock::{Clock, ManualClock, MonotonicClock, Timestamp};
+#[cfg(feature = "quanta")]
+pub use clock::QuantaClock;
+pub use clock::{Clock, CoarseClock, ManualClock, MonotonicClock, Timestamp};
 pub use key::KeyEncode;
 pub use limiter::{Algorithm, Builder, Decision, Denial, Error, Limiter, NoQuota, Stats};
 pub use quota::{Quota, QuotaError, QuotaErrorKind, Rate};

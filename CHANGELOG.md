@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Quota` and `Rate`: up to four limits per quota, with optional token bucket bursts.
 - `quota!`, which checks the quota notation at compile time, and `FromStr` for config files.
 - `Clock` with `MonotonicClock` and `ManualClock`, and the `Timestamp` type.
+- `CoarseClock`, read with one atomic load and advanced by a background thread, for the fastest hits; it may lag by a tick, which only under-admits.
+- `QuantaClock` (feature `quanta`), which reads the processor's timestamp counter.
 - `KeyEncode`: a stable, collision-free byte encoding of keys for stores shared between processes.
 - `Limiter`, an in-memory rate limiter: `hit`, `hit_n`, `test`, `test_n`, `stats` and `reset`, with keys looked up by borrowed form (`&str` for `String` keys).
 - Four algorithms: `TokenBucket` (the default, alias `LeakyBucket`), `FixedWindow`, `SlidingWindow` and `SlidingLog`.

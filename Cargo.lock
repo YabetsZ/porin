@@ -482,6 +482,7 @@ dependencies = [
  "loom",
  "pollster",
  "proptest",
+ "quanta",
  "trybuild",
 ]
 

@@ -19,10 +19,12 @@ blocking = []
 tower = []
 axum = ["tower"]
 peer = []
+quanta = ["dep:quanta"]
 
 [dependencies]
 futures-timer = "3.0.4"
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
+quanta = { version = "0.12.6", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true
