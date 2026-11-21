@@ -122,7 +122,7 @@ mod benches {
         fn governor(bencher: Bencher<'_, '_>) {
             let limiter = governor_unlimited();
             for key in 0..KEYS {
-                let _ = limiter.check_key(&key);
+                assert!(limiter.check_key(&key).is_ok());
             }
             bencher.bench(|| limiter.check_key(&next_key()).is_ok());
         }
@@ -139,6 +139,85 @@ mod benches {
             bencher.bench_local(|| {
                 let key = &keys[next_key() as usize];
                 store.hit(&UNLIMITED, key, clock.now())
+            });
+        }
+    }
+
+    /// The public API end to end: clock read, store, `Decision`, and the
+    /// future polled once (the memory store answers on the first poll).
+    mod limiter {
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
+        use porin::Limiter;
+
+        use super::*;
+
+        fn now_or_never<F: Future>(future: F) -> F::Output {
+            let mut context = Context::from_waker(Waker::noop());
+            match pin!(future).poll(&mut context) {
+                Poll::Ready(output) => output,
+                Poll::Pending => unreachable!("the memory store answers on the first poll"),
+            }
+        }
+
+        fn filled<K: std::hash::Hash + Eq + Clone + Send + Sync>(
+            quota: Quota,
+            keys: impl Iterator<Item = K>,
+        ) -> Limiter<K> {
+            let limiter = Limiter::memory(quota);
+            for key in keys {
+                assert!(now_or_never(limiter.hit(&key)).is_ok_and(|d| d.is_allowed()));
+            }
+            limiter
+        }
+
+        #[divan::bench(threads = [1, 16])]
+        fn porin(bencher: Bencher<'_, '_>) {
+            let limiter = filled(UNLIMITED, 0..KEYS);
+            bencher.bench(|| now_or_never(limiter.hit(&next_key())));
+        }
+
+        /// Two rates per key, so every hit takes the write lock.
+        #[divan::bench(threads = [1, 16])]
+        fn porin_two_rates(bencher: Bencher<'_, '_>) {
+            const TWO: Quota = quota!("4000000000/second; 4000000000/minute");
+            let limiter = filled(TWO, 0..KEYS);
+            bencher.bench(|| now_or_never(limiter.hit(&next_key())));
+        }
+
+        #[divan::bench(threads = [1, 16])]
+        fn governor(bencher: Bencher<'_, '_>) {
+            let limiter = governor_unlimited();
+            for key in 0..KEYS {
+                assert!(limiter.check_key(&key).is_ok());
+            }
+            bencher.bench(|| limiter.check_key(&next_key()).is_ok());
+        }
+
+        /// `String` keys hit with a borrowed `&str`: no allocation per hit.
+        #[divan::bench]
+        fn porin_str_keys(bencher: Bencher<'_, '_>) {
+            let keys: Vec<String> = (0..KEYS).map(|key| format!("user-{key}")).collect();
+            let limiter = filled(UNLIMITED, keys.iter().cloned());
+            bencher.bench_local(|| {
+                let key = keys[next_key() as usize].as_str();
+                now_or_never(limiter.hit(key))
+            });
+        }
+
+        /// governor needs the owned key type, so a `&str` caller allocates.
+        #[divan::bench]
+        fn governor_string_keys(bencher: Bencher<'_, '_>) {
+            let keys: Vec<String> = (0..KEYS).map(|key| format!("user-{key}")).collect();
+            let limiter: governor::DefaultKeyedRateLimiter<String> =
+                governor::RateLimiter::keyed(governor::Quota::per_second(NonZeroU32::MAX));
+            for key in &keys {
+                assert!(limiter.check_key(key).is_ok());
+            }
+            bencher.bench_local(|| {
+                let key = keys[next_key() as usize].as_str();
+                limiter.check_key(&key.to_owned()).is_ok()
             });
         }
     }
