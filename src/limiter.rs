@@ -252,6 +252,66 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
         Ok(())
     }
 
+    /// Spends one unit for `key`, waiting until the quota allows it.
+    ///
+    /// For clients of an outside API with a known limit: instead of sending a
+    /// request that would be refused, wait for the exact moment it fits. Each
+    /// wait lasts the denial's [`retry_after`](Denial::retry_after); if other
+    /// callers spend the room first, it waits again. Dropping the future
+    /// stops waiting and spends nothing.
+    ///
+    /// Waits use real time, whatever [`Clock`] the limiter was built with.
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use porin::{Limiter, quota};
+    ///
+    /// # pollster::block_on(async {
+    /// let limiter: Limiter<String> = Limiter::memory(quota!("100/second"));
+    /// for _ in 0..101 {
+    ///     // The 101st call waits about 10 ms for the bucket to refill.
+    ///     limiter.until_ready("api.example.com").await?;
+    /// }
+    /// # Ok::<(), porin::Error>(())
+    /// # }).unwrap();
+    /// ```
+    pub async fn until_ready<Q>(&self, key: &Q) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        self.until_ready_n(key, 1).await
+    }
+
+    /// Spends `cost` units for `key`, waiting until the quota allows them
+    /// all. Returns a denial without waiting if `cost` can never fit, because
+    /// it is larger than the quota allows at once. See
+    /// [`until_ready`](Self::until_ready).
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    pub async fn until_ready_n<Q>(&self, key: &Q, cost: u32) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        loop {
+            match self.hit_n(key, cost).await? {
+                Decision::Denied(denial) => match denial.retry_after() {
+                    Some(wait) => futures_timer::Delay::new(wait).await,
+                    None => return Ok(Decision::Denied(denial)),
+                },
+                allowed @ Decision::Allowed(_) => return Ok(allowed),
+            }
+        }
+    }
+
     /// The quota every key is limited to.
     #[must_use]
     pub fn quota(&self) -> &Quota {

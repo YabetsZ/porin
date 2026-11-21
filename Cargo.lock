@@ -476,6 +476,7 @@ name = "porin"
 version = "0.0.0"
 dependencies = [
  "divan",
+ "futures-timer",
  "governor",
  "hashbrown 0.17.1",
  "loom",

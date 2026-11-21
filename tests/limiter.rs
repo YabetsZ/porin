@@ -227,3 +227,29 @@ fn debug_names_the_algorithm_and_quota() {
         "{debug}"
     );
 }
+
+#[test]
+fn until_ready_waits_for_room() {
+    let limiter: Limiter<u64> = Limiter::memory(quota!("100/second"));
+    block_on(async {
+        assert!(allowed(limiter.hit_n(&1, 100).await), "spend the burst");
+        let start = std::time::Instant::now();
+        assert!(allowed(limiter.until_ready(&1).await));
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_millis(9),
+            "one token refills in 10 ms; waited {waited:?}"
+        );
+    });
+}
+
+#[test]
+fn until_ready_returns_at_once_when_the_cost_never_fits() {
+    let limiter: Limiter<u64> = Limiter::memory(quota!("5/hour"));
+    block_on(async {
+        let Ok(Decision::Denied(denial)) = limiter.until_ready_n(&1, 6).await else {
+            panic!("6 units never fit a burst of 5");
+        };
+        assert_eq!(denial.retry_after(), None);
+    });
+}
