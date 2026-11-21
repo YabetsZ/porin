@@ -216,10 +216,17 @@ impl<K, A: Algorithm> fmt::Debug for Limiter<K, A> {
 }
 
 /// Runs `future` on the calling thread, parking it while the future waits.
-/// The memory store's futures finish on the first poll; this also serves
-/// stores that wait on IO driven by another thread.
+/// The memory store's futures finish on the first poll, which allocates
+/// nothing; a waker that unparks the thread is built only if one doesn't,
+/// for stores that wait on IO driven by another thread.
 fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = pin!(future);
+    if let Poll::Ready(output) = future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        return output;
+    }
     let waker = Waker::from(Arc::new(Unpark(thread::current())));
     let mut context = Context::from_waker(&waker);
     loop {
@@ -241,5 +248,26 @@ impl Wake for Unpark {
 
     fn wake_by_ref(self: &Arc<Self>) {
         self.0.unpark();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::block_on;
+
+    /// A future that isn't ready on the first poll parks the thread until a
+    /// timer thread wakes it.
+    #[test]
+    #[cfg_attr(miri, ignore = "futures-timer's helper thread outlives the test")]
+    fn block_on_parks_until_woken() {
+        assert_eq!(
+            block_on(async {
+                futures_timer::Delay::new(Duration::from_millis(5)).await;
+                7
+            }),
+            7
+        );
     }
 }
