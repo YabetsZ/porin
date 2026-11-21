@@ -62,17 +62,27 @@ impl Algorithm for TokenBucket {
                 retry: Retry::Never,
             };
         }
-        let new_tat = tat.saturating_add(bucket.refill_time(cost));
+        // In u128: a bucket that takes centuries to refill overflows u64
+        // nanoseconds, and saturating there would allow every hit.
+        let new_tat = u128::from(tat).saturating_add(bucket.refill_time(cost));
         let allow_at = new_tat.saturating_sub(bucket.tolerance);
-        if now >= allow_at {
+        let Ok(stored_tat) = u64::try_from(new_tat) else {
+            // The new TAT doesn't fit, and it only grows as time passes.
+            return Check::Denied {
+                stats: bucket.stats(now, tat),
+                retry: Retry::Never,
+            };
+        };
+        if u128::from(now) >= allow_at {
             Check::Allowed {
-                commit: GcraState { tat: new_tat },
-                stats: bucket.stats(now, new_tat),
+                commit: GcraState { tat: stored_tat },
+                stats: bucket.stats(now, stored_tat),
             }
         } else {
+            let wait = allow_at.saturating_sub(u128::from(now));
             Check::Denied {
                 stats: bucket.stats(now, tat),
-                retry: Retry::After(nanos(allow_at.saturating_sub(now))),
+                retry: Retry::After(nanos(u64::try_from(wait).unwrap_or(u64::MAX))),
             }
         }
     }
@@ -86,8 +96,9 @@ struct Bucket {
     /// Nanoseconds to refill one token, rounded up. At least 1.
     interval: u64,
     burst: u32,
-    /// How far the TAT may run ahead of now: the refill time of a full bucket.
-    tolerance: u64,
+    /// How far the TAT may run ahead of now: the refill time of a full
+    /// bucket. Can exceed `u64::MAX`.
+    tolerance: u128,
 }
 
 impl Bucket {
@@ -100,18 +111,20 @@ impl Bucket {
         Self {
             interval,
             burst,
-            tolerance: interval.saturating_mul(u64::from(burst)),
+            tolerance: u128::from(interval).saturating_mul(u128::from(burst)),
         }
     }
 
-    fn refill_time(&self, tokens: u32) -> u64 {
-        self.interval.saturating_mul(u64::from(tokens))
+    fn refill_time(&self, tokens: u32) -> u128 {
+        u128::from(self.interval).saturating_mul(u128::from(tokens))
     }
 
     fn stats(&self, now: u64, tat: u64) -> Stats {
-        let spare = now.saturating_add(self.tolerance).saturating_sub(tat);
+        let spare = u128::from(now)
+            .saturating_add(self.tolerance)
+            .saturating_sub(u128::from(tat));
         let remaining = spare
-            .checked_div(self.interval)
+            .checked_div(u128::from(self.interval))
             .and_then(|tokens| u32::try_from(tokens).ok())
             .unwrap_or(0)
             .min(self.burst);
@@ -220,6 +233,23 @@ mod tests {
                 "unit hit {n} of a burst of 9"
             );
         }
+    }
+
+    #[test]
+    fn a_burst_too_long_to_refill_in_nanoseconds_still_limits() {
+        // A full bucket takes 300,000 days to refill: more nanoseconds than
+        // a u64 holds. Saturating arithmetic used to allow every hit.
+        let rate = Rate::per_day(NonZeroU32::new(1).unwrap())
+            .with_burst(NonZeroU32::new(300_000).unwrap());
+        let mut state = GcraState::default();
+        let allowed = (0..400_000)
+            .filter(|_| matches!(hit(rate, &mut state, at(0), 1), Check::Allowed { .. }))
+            .count();
+        assert!(
+            allowed <= 300_000,
+            "{allowed} allowed from a burst of 300,000"
+        );
+        assert!(allowed > 0);
     }
 
     #[test]
