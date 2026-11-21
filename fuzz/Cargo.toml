@@ -1,0 +1,23 @@
+[package]
+name = "porin-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+porin = { path = ".." }
+
+# Keeps this crate out of any parent workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "quota_parse"
+path = "fuzz_targets/quota_parse.rs"
+test = false
+doc = false
+bench = false

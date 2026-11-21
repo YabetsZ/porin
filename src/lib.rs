@@ -8,4 +8,20 @@
 //! Named after porins, the proteins that form channels in a cell membrane and
 //! decide what passes through.
 //!
-//! Status: design phase, no usable code yet.
+//! Status: early development. Quotas and clocks exist; algorithms and stores
+//! are next.
+//!
+//! ```
+//! use porin::quota;
+//!
+//! // Checked at compile time: a typo in the notation is a compile error.
+//! let api = quota!("10/second; 1000/day");
+//! assert_eq!(api.to_string(), "10/second; 1000/day");
+//! ```
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+pub mod clock;
+pub mod quota;
+
+pub use clock::{Clock, ManualClock, MonotonicClock, Timestamp};
+pub use quota::{Quota, QuotaError, QuotaErrorKind, Rate};

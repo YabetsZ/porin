@@ -48,3 +48,7 @@ dbg_macro = "warn"
 todo = "warn"
 print_stdout = "warn"
 print_stderr = "warn"
+
+[dev-dependencies]
+proptest = "1.11.0"
+trybuild = "1.0.119"

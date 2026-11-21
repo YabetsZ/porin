@@ -48,6 +48,15 @@ jobs:
       - run: cargo nextest run --all-features --no-tests=pass
       - run: cargo test --doc --all-features
 
+  ui:
+    # Compile-fail snapshots depend on compiler wording, so they run on one
+    # pinned toolchain. Bump it together with the .stderr files.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - run: cargo test --test ui -- --ignored
+
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -79,7 +88,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri
-      - run: cargo miri test --lib
+      - run: cargo miri test --all-features
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
 

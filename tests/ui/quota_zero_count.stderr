@@ -1,0 +1,7 @@
+error[E0080]: evaluation panicked: count must be at least 1
+ --> tests/ui/quota_zero_count.rs:2:13
+  |
+2 |     let _ = porin::quota!("0/second");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::QUOTA` failed here
+  |
+  = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `porin::quota` (in Nightly builds, run with -Z macro-backtrace for more info)
