@@ -100,7 +100,9 @@ impl Clock for MonotonicClock {
 /// admits more than the quota.
 ///
 /// Clones share one thread. The thread exits within a tick after the last
-/// clone is dropped.
+/// clone is dropped. A long tick makes all of this coarser: with a
+/// one-second tick, keys refill a second late and `until_ready` may wait up
+/// to that long.
 ///
 /// # Examples
 ///
