@@ -20,17 +20,19 @@
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no store calls the algorithms yet; the in-memory store will"
-    )
-)]
 mod algorithm;
 pub mod clock;
 pub mod key;
 pub mod quota;
+#[cfg_attr(
+    any(not(test), loom),
+    expect(
+        dead_code,
+        reason = "nothing public uses the stores yet; the limiter will"
+    )
+)]
+mod store;
+mod sync;
 
 pub use clock::{Clock, ManualClock, MonotonicClock, Timestamp};
 pub use key::KeyEncode;

@@ -14,7 +14,9 @@ use super::fixed_window::FixedWindow;
 use super::gcra::Gcra;
 use super::sliding_log::SlidingLog;
 use super::sliding_window::SlidingWindow;
-use super::{Algorithm, Check, Retry};
+use super::{Algorithm, Check, Outcome, Retry, hit_quota};
+use crate::Quota;
+use crate::quota::MAX_RATES;
 use crate::{Rate, Timestamp};
 
 #[derive(Clone, Copy, Debug)]
@@ -280,5 +282,68 @@ proptest! {
                 prop_assert!(spent <= bound, "spent {} > bound {} from {:?} to {:?}", spent, bound, first, last);
             }
         }
+    }
+}
+
+/// A denied hit changes no rate's state, and an allowed one changes them
+/// exactly as checking and committing each rate alone would.
+fn quota_is_all_or_nothing<A: Algorithm>(
+    quota: &Quota,
+    ops: &[(u64, u32)],
+) -> Result<(), TestCaseError>
+where
+    A::State: Clone + PartialEq + std::fmt::Debug,
+{
+    let mut states: [A::State; MAX_RATES] = std::array::from_fn(|_| A::State::default());
+    let mut now = 0;
+    for &(advance, cost) in ops {
+        now += advance;
+        let at = Timestamp::from_nanos(now);
+        let before = states.clone();
+        match hit_quota::<A, MAX_RATES>(quota, &mut states, at, cost) {
+            Outcome::Denied { .. } => {
+                prop_assert_eq!(&states, &before, "a denied hit changed state");
+            }
+            Outcome::Allowed(_) => {
+                for ((rate, state), old) in quota.rates().iter().zip(&states).zip(&before) {
+                    let mut alone = old.clone();
+                    match A::check(*rate, &alone, at, cost) {
+                        Check::Allowed { commit, .. } => A::commit(&mut alone, commit),
+                        Check::Denied { .. } => {
+                            prop_assert!(false, "allowed overall but {} denies", rate);
+                        }
+                    }
+                    prop_assert_eq!(state, &alone);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn multi_rate_quota() -> impl Strategy<Value = Quota> {
+    prop::collection::vec(
+        (1..=6_u32, prop::sample::select(&PERIODS_MS[..])),
+        1..=MAX_RATES,
+    )
+    .prop_map(|rates| {
+        let mut quota = Quota::new(rate(rates[0].0, rates[0].1, rates[0].0));
+        for &(count, period_ms) in &rates[1..] {
+            if let Ok(with) = quota.with(rate(count, period_ms, count)) {
+                quota = with;
+            }
+        }
+        quota
+    })
+}
+
+proptest! {
+    #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn quotas_are_all_or_nothing(quota in multi_rate_quota(), ops in ops(1_000, 6)) {
+        quota_is_all_or_nothing::<Gcra>(&quota, &ops)?;
+        quota_is_all_or_nothing::<FixedWindow>(&quota, &ops)?;
+        quota_is_all_or_nothing::<SlidingWindow>(&quota, &ops)?;
+        quota_is_all_or_nothing::<SlidingLog>(&quota, &ops)?;
     }
 }

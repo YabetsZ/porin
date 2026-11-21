@@ -23,6 +23,23 @@ pub(crate) struct GcraState {
     tat: u64,
 }
 
+impl GcraState {
+    /// The state as one word, so a store can keep it in an atomic.
+    pub(crate) const fn to_word(self) -> u64 {
+        self.tat
+    }
+
+    pub(crate) const fn from_word(word: u64) -> Self {
+        Self { tat: word }
+    }
+
+    /// From this time on the bucket is full, which is the never-hit state,
+    /// until it is hit again.
+    pub(crate) const fn idle_at(self) -> u64 {
+        self.tat
+    }
+}
+
 impl Algorithm for Gcra {
     type State = GcraState;
     type Commit = GcraState;

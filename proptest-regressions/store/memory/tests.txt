@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a1f8bdffc2c0e7199944c4b005914679505f64d5b8a7485d00e6671f9f96d2d2 # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(0, 0, 0, false), (1, 0, 0, false), (1, 0, 0, false), (0, 0, 0, false), (0, 0, 0, false), (0, 0, 1, false), (1, 0, 2, false), (2, 0, 1, false), (4, 1000000000, 4, false), (0, 28, 3, false), (5, 53480580, 2, false), (0, 370, 4, false)]
+cc 12b13130869707bc4f766c7a1b12b4a13aa4fdbc57cb8ffa1e3cb47e83e163b1 # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(3, 0, 1, false), (0, 1, 1, false), (3, 1000000000, 1, false), (2, 0, 1, false), (1, 0, 1, false), (3, 0, 0, false)]

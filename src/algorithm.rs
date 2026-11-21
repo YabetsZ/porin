@@ -6,16 +6,16 @@
 //! a quota with several rates is all-or-nothing. Nothing here reads a clock,
 //! does IO or takes a lock; stores own the state and the concurrency.
 
-mod fixed_window;
-mod gcra;
-mod sliding_log;
-mod sliding_window;
+pub(crate) mod fixed_window;
+pub(crate) mod gcra;
+pub(crate) mod sliding_log;
+pub(crate) mod sliding_window;
 #[cfg(test)]
 mod tests;
 
 use std::time::Duration;
 
-use crate::{Rate, Timestamp};
+use crate::{Quota, Rate, Timestamp};
 
 /// One rate limiting algorithm.
 pub(crate) trait Algorithm {
@@ -58,6 +58,102 @@ pub(crate) enum Retry {
     After(Duration),
     /// The cost is larger than the rate can ever allow at once.
     Never,
+}
+
+/// The answer for a whole quota.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Allowed(Stats),
+    Denied { stats: Stats, retry: Retry },
+}
+
+/// Checks `cost` against every rate in `quota` and records it in all of
+/// them only if all of them allow it. `states[i]` belongs to
+/// `quota.rates()[i]`. Rates past `N` are not checked, so callers must keep
+/// `quota.rates().len() <= N`.
+///
+/// The combined stats are the tightest across rates: the smallest
+/// `remaining` and the largest `reset_after`. A denial waits for the slowest
+/// denying rate; with no hits in between, every rate only relaxes over time,
+/// so all of them allow by then.
+pub(crate) fn hit_quota<A: Algorithm, const N: usize>(
+    quota: &Quota,
+    states: &mut [A::State; N],
+    now: Timestamp,
+    cost: u32,
+) -> Outcome {
+    let rates = quota.rates();
+    let mut commits: [Option<A::Commit>; N] = std::array::from_fn(|_| None);
+    let mut summary = Stats::UNLIMITED;
+    let mut retry = None;
+    for ((rate, state), slot) in rates.iter().zip(states.iter()).zip(commits.iter_mut()) {
+        match A::check(*rate, state, now, cost) {
+            Check::Allowed {
+                commit,
+                stats: rate_stats,
+            } => {
+                *slot = Some(commit);
+                summary = summary.tightest(rate_stats);
+            }
+            Check::Denied {
+                retry: rate_retry, ..
+            } => {
+                retry = Some(retry.map_or(rate_retry, |earlier: Retry| earlier.later(rate_retry)));
+            }
+        }
+    }
+
+    if let Some(retry) = retry {
+        // Allowed rates reported stats as if the hit were recorded. It
+        // isn't, so report what every rate has without it.
+        let unchanged = rates
+            .iter()
+            .zip(states.iter())
+            .fold(Stats::UNLIMITED, |summary, (rate, state)| {
+                summary.tightest(peek_stats::<A>(*rate, state, now))
+            });
+        return Outcome::Denied {
+            stats: unchanged,
+            retry,
+        };
+    }
+    for (state, commit) in states.iter_mut().zip(commits) {
+        if let Some(commit) = commit {
+            A::commit(state, commit);
+        }
+    }
+    Outcome::Allowed(summary)
+}
+
+fn peek_stats<A: Algorithm>(rate: Rate, state: &A::State, now: Timestamp) -> Stats {
+    match A::check(rate, state, now, 0) {
+        Check::Allowed { stats, .. } | Check::Denied { stats, .. } => stats,
+    }
+}
+
+impl Stats {
+    /// The identity for [`Stats::tightest`].
+    const UNLIMITED: Self = Self {
+        remaining: u32::MAX,
+        reset_after: Duration::ZERO,
+    };
+
+    fn tightest(self, other: Self) -> Self {
+        Self {
+            remaining: self.remaining.min(other.remaining),
+            reset_after: self.reset_after.max(other.reset_after),
+        }
+    }
+}
+
+impl Retry {
+    /// Whichever comes later; `Never` is later than any wait.
+    fn later(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::After(a), Self::After(b)) => Self::After(a.max(b)),
+            (Self::Never, _) | (_, Self::Never) => Self::Never,
+        }
+    }
 }
 
 /// `⌊a × b / divisor⌋`, saturating at `u64::MAX`. A zero divisor saturates,

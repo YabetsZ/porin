@@ -21,6 +21,7 @@ axum = ["tower"]
 peer = []
 
 [dependencies]
+hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -52,3 +53,6 @@ print_stderr = "warn"
 [dev-dependencies]
 proptest = "1.11.0"
 trybuild = "1.0.119"
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
