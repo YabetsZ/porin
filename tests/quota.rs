@@ -264,3 +264,17 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn long_periods_that_display_in_milliseconds_parse_back() {
+    // 5,000,000,001 ms is not a whole number of any larger unit, so it
+    // displays in milliseconds with a multiplier past u32::MAX.
+    let rate = Rate::new(
+        NonZeroU32::new(10).unwrap(),
+        Duration::from_millis(5_000_000_001),
+    )
+    .unwrap();
+    let text = rate.to_string();
+    assert_eq!(text, "10/5000000001 milliseconds");
+    assert_eq!(text.parse::<Quota>().unwrap(), Quota::new(rate));
+}

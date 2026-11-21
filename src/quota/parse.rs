@@ -80,7 +80,9 @@ const fn parse_rate<'a>(input: &[u8], rest: &'a [u8]) -> Result<(Rate, &'a [u8])
     };
 
     let multiplier_start = skip_whitespace(rest);
-    let (multiplier, unit_start) = match parse_u32(multiplier_start) {
+    // A u64: a period is any whole number of milliseconds up to the
+    // maximum, and Display writes long uneven ones in milliseconds.
+    let (multiplier, unit_start) = match parse_u64(multiplier_start) {
         Number::Value(0, _) => {
             return Err(error_at(Kind::ZeroMultiplier, input, multiplier_start));
         }
@@ -96,7 +98,7 @@ const fn parse_rate<'a>(input: &[u8], rest: &'a [u8]) -> Result<(Rate, &'a [u8])
     let Some(unit_ms) = unit_millis(unit) else {
         return Err(error_at(Kind::UnknownUnit, input, unit_start));
     };
-    let period_ms = match (multiplier as u64).checked_mul(unit_ms) {
+    let period_ms = match multiplier.checked_mul(unit_ms) {
         Some(period_ms) if period_ms <= MAX_PERIOD_MS => period_ms,
         _ => return Err(error_at(Kind::PeriodTooLong, input, multiplier_start)),
     };
@@ -119,22 +121,37 @@ const fn parse_rate<'a>(input: &[u8], rest: &'a [u8]) -> Result<(Rate, &'a [u8])
     }
 }
 
-enum Number<'a> {
-    Value(u32, &'a [u8]),
+enum Number<'a, T> {
+    Value(T, &'a [u8]),
     Missing,
     TooLarge,
 }
 
-const fn parse_u32(bytes: &[u8]) -> Number<'_> {
+const fn parse_u32(bytes: &[u8]) -> Number<'_, u32> {
+    match parse_u64(bytes) {
+        Number::Value(value, rest) if value <= u32::MAX as u64 => {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "checked against u32::MAX just above"
+            )]
+            let value = value as u32;
+            Number::Value(value, rest)
+        }
+        Number::Value(..) | Number::TooLarge => Number::TooLarge,
+        Number::Missing => Number::Missing,
+    }
+}
+
+const fn parse_u64(bytes: &[u8]) -> Number<'_, u64> {
     let mut rest = bytes;
-    let mut value: u32 = 0;
+    let mut value: u64 = 0;
     let mut has_digits = false;
     while let Some((&byte, tail)) = rest.split_first() {
         let Some(digit) = digit_value(byte) else {
             break;
         };
         value = match value.checked_mul(10) {
-            Some(shifted) => match shifted.checked_add(digit) {
+            Some(shifted) => match shifted.checked_add(digit as u64) {
                 Some(value) => value,
                 None => return Number::TooLarge,
             },
