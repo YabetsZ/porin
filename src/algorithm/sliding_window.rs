@@ -16,8 +16,11 @@ use super::{
 };
 use crate::{Rate, Timestamp};
 
-#[derive(Debug)]
-pub(crate) struct SlidingWindow;
+/// Sliding window counter: weights the previous window's count by how much
+/// of it still overlaps the last period. Smooths fixed window's edge burst
+/// with two counters per key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SlidingWindow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SlidingWindowState {

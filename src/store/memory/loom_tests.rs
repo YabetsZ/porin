@@ -7,7 +7,7 @@ use loom::sync::Arc;
 use loom::sync::atomic::{AtomicU32, Ordering};
 
 use super::MemoryStore;
-use crate::algorithm::gcra::Gcra;
+use crate::algorithm::gcra::TokenBucket;
 use crate::store::Hit;
 use crate::{Timestamp, quota};
 
@@ -17,7 +17,7 @@ use crate::{Timestamp, quota};
 fn loom_last_unit_goes_to_exactly_one_thread() {
     loom::model(|| {
         let quota = quota!("1/second");
-        let store = Arc::new(MemoryStore::<u8, Gcra>::with_shards(
+        let store = Arc::new(MemoryStore::<u8, TokenBucket>::with_shards(
             NonZeroUsize::new(4).unwrap(),
             2,
         ));
@@ -43,7 +43,7 @@ fn loom_last_unit_goes_to_exactly_one_thread() {
 /// `quota_b`, and requires exactly one to get it.
 fn race_for_last_unit(quota_a: crate::Quota, quota_b: crate::Quota) {
     loom::model(move || {
-        let store = Arc::new(MemoryStore::<u8, Gcra>::with_shards(
+        let store = Arc::new(MemoryStore::<u8, TokenBucket>::with_shards(
             NonZeroUsize::new(4).unwrap(),
             2,
         ));

@@ -53,6 +53,7 @@ print_stderr = "warn"
 [dev-dependencies]
 divan = "0.1.21"
 governor = "0.10.4"
+pollster = "1.0.3"
 proptest = "1.11.0"
 trybuild = "1.0.119"
 

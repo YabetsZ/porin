@@ -9,8 +9,11 @@ use std::collections::VecDeque;
 use super::{Algorithm, Check, Retry, Stats, nanos};
 use crate::{Rate, Timestamp};
 
-#[derive(Debug)]
-pub(crate) struct SlidingLog;
+/// Sliding log: remembers the time of every unit spent in the last period
+/// and allows a hit only if the period holds room for it. Exact, but keeps
+/// up to `count` entries per key. Some libraries call it a moving window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SlidingLog;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SlidingLogState {

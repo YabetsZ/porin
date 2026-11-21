@@ -8,10 +8,10 @@
 use std::sync::atomic::Ordering;
 
 use crate::algorithm::fixed_window::FixedWindow;
-use crate::algorithm::gcra::{Gcra, GcraState};
+use crate::algorithm::gcra::{GcraState, TokenBucket};
 use crate::algorithm::sliding_log::SlidingLog;
 use crate::algorithm::sliding_window::SlidingWindow;
-use crate::algorithm::{Algorithm, Check, Outcome, hit_quota};
+use crate::algorithm::{Algorithm, Check, Outcome, check_quota, hit_quota};
 use crate::sync::AtomicU64;
 use crate::{Quota, Rate, Timestamp};
 
@@ -32,6 +32,9 @@ pub(crate) trait Slot {
 
     /// Spends `cost` against every rate of `quota`, all or nothing.
     fn hit(&mut self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome;
+
+    /// What [`Slot::hit`] would answer, without recording anything.
+    fn test(&self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome;
 
     /// Spends `cost` against a single-rate quota through shared access, or
     /// returns `None` if the slot needs exclusive access.
@@ -65,6 +68,10 @@ impl<A: Algorithm, const N: usize> Slot for Locked<A, N> {
                 .saturating_add(u64::try_from(stats.reset_after.as_nanos()).unwrap_or(u64::MAX));
         }
         outcome
+    }
+
+    fn test(&self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome {
+        check_quota::<A, N>(quota, &self.states, now, cost).0
     }
 
     fn hit_shared(&self, _: Rate, _: Timestamp, _: u32) -> Option<Outcome> {
@@ -106,7 +113,7 @@ impl<const N: usize> Slot for Atomic<N> {
 
     fn hit(&mut self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome {
         let mut states = self.states();
-        let outcome = hit_quota::<Gcra, N>(quota, &mut states, now, cost);
+        let outcome = hit_quota::<TokenBucket, N>(quota, &mut states, now, cost);
         if let Outcome::Allowed(_) = outcome {
             for (tat, state) in self.tats.iter().zip(states) {
                 tat.store(state.to_word(), Ordering::Relaxed);
@@ -115,11 +122,15 @@ impl<const N: usize> Slot for Atomic<N> {
         outcome
     }
 
+    fn test(&self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome {
+        check_quota::<TokenBucket, N>(quota, &self.states(), now, cost).0
+    }
+
     fn hit_shared(&self, rate: Rate, now: Timestamp, cost: u32) -> Option<Outcome> {
         let tat = self.tats.first()?;
         let mut current = tat.load(Ordering::Relaxed);
         loop {
-            match Gcra::check(rate, &GcraState::from_word(current), now, cost) {
+            match TokenBucket::check(rate, &GcraState::from_word(current), now, cost) {
                 Check::Allowed { commit, stats } => {
                     match tat.compare_exchange_weak(
                         current,
@@ -146,7 +157,7 @@ impl<const N: usize> Slot for Atomic<N> {
     }
 }
 
-impl Stored for Gcra {
+impl Stored for TokenBucket {
     type Slot<const N: usize> = Atomic<N>;
 }
 

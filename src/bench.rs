@@ -7,7 +7,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use crate::algorithm::fixed_window::{FixedWindow, FixedWindowState};
-use crate::algorithm::gcra::{Gcra, GcraState};
+use crate::algorithm::gcra::{GcraState, TokenBucket};
 use crate::algorithm::sliding_log::{SlidingLog, SlidingLogState};
 use crate::algorithm::sliding_window::{SlidingWindow, SlidingWindowState};
 use crate::algorithm::{Algorithm, Check};
@@ -17,7 +17,7 @@ use crate::{Quota, Rate, Timestamp};
 
 /// The in-memory store with the token bucket, sized for single-rate quotas.
 #[derive(Debug)]
-pub struct Store<K>(MemoryStore<K, Gcra, 1>);
+pub struct Store<K>(MemoryStore<K, TokenBucket, 1>);
 
 impl<K: Hash + Eq + Clone> Store<K> {
     /// A store that tracks at most `max_keys` keys.
@@ -74,7 +74,7 @@ pub struct AlgorithmState(Inner);
 
 #[derive(Debug)]
 enum Inner {
-    Gcra(GcraState),
+    TokenBucket(GcraState),
     FixedWindow(FixedWindowState),
     SlidingWindow(SlidingWindowState),
     SlidingLog(SlidingLogState),
@@ -89,14 +89,14 @@ impl AlgorithmState {
             "fixed_window" => Inner::FixedWindow(FixedWindowState::default()),
             "sliding_window" => Inner::SlidingWindow(SlidingWindowState::default()),
             "sliding_log" => Inner::SlidingLog(SlidingLogState::default()),
-            _ => Inner::Gcra(GcraState::default()),
+            _ => Inner::TokenBucket(GcraState::default()),
         })
     }
 
     /// Checks and commits one unit; returns whether it was allowed.
     pub fn hit(&mut self, rate: Rate, now: Timestamp) -> bool {
         match &mut self.0 {
-            Inner::Gcra(state) => hit::<Gcra>(rate, state, now),
+            Inner::TokenBucket(state) => hit::<TokenBucket>(rate, state, now),
             Inner::FixedWindow(state) => hit::<FixedWindow>(rate, state, now),
             Inner::SlidingWindow(state) => hit::<SlidingWindow>(rate, state, now),
             Inner::SlidingLog(state) => hit::<SlidingLog>(rate, state, now),

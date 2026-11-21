@@ -14,7 +14,7 @@ use proptest::prelude::*;
 
 use super::MemoryStore;
 use super::slot::Stored;
-use crate::algorithm::gcra::Gcra;
+use crate::algorithm::gcra::TokenBucket;
 use crate::algorithm::sliding_log::SlidingLog;
 use crate::algorithm::{Outcome, Retry, hit_quota};
 use crate::quota::MAX_RATES;
@@ -153,7 +153,7 @@ proptest! {
     #[test]
     #[cfg_attr(miri, ignore = "too slow under Miri")]
     fn gcra_store_agrees_with_a_plain_map(quota in prop::sample::select(&QUOTAS[..]), ops in ops()) {
-        agrees_with_plain_map::<Gcra, MAX_RATES>(&quota, &ops)?;
+        agrees_with_plain_map::<TokenBucket, MAX_RATES>(&quota, &ops)?;
     }
 
     #[test]
@@ -166,14 +166,14 @@ proptest! {
     #[test]
     #[cfg_attr(miri, ignore = "too slow under Miri")]
     fn one_rate_stores_agree_with_a_plain_map(ops in ops()) {
-        agrees_with_plain_map::<Gcra, 1>(&QUOTAS[0], &ops)?;
+        agrees_with_plain_map::<TokenBucket, 1>(&QUOTAS[0], &ops)?;
         agrees_with_plain_map::<SlidingLog, 1>(&QUOTAS[0], &ops)?;
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "too slow under Miri")]
     fn capped_gcra_store_agrees_with_a_plain_map(quota in prop::sample::select(&QUOTAS[..]), ops in capped_ops()) {
-        capped_store_agrees_with_a_plain_map::<Gcra>(&quota, &ops)?;
+        capped_store_agrees_with_a_plain_map::<TokenBucket>(&quota, &ops)?;
     }
 
     #[test]
@@ -186,7 +186,7 @@ proptest! {
 #[test]
 fn full_store_refuses_new_keys_until_one_goes_idle() {
     let quota = quota!("1/second");
-    let store = store::<Gcra>(2, 1);
+    let store = store::<TokenBucket>(2, 1);
     assert!(allowed(store.hit(&quota, &1, at(0), 1)));
     assert!(allowed(store.hit(&quota, &2, at(500), 1)));
     assert_eq!(
@@ -210,7 +210,7 @@ fn full_store_refuses_new_keys_until_one_goes_idle() {
 #[test]
 fn evicting_an_idle_key_changes_no_decision() {
     let quota = quota!("2/second");
-    let store = store::<Gcra>(1, 1);
+    let store = store::<TokenBucket>(1, 1);
     assert!(allowed(store.hit(&quota, &1, at(0), 2)));
     assert!(
         allowed(store.hit(&quota, &2, at(1_000), 1)),
@@ -229,7 +229,7 @@ fn evicting_an_idle_key_changes_no_decision() {
 #[test]
 fn peeks_and_denied_hits_store_nothing() {
     let quota = quota!("2/second");
-    let store = store::<Gcra>(1, 1);
+    let store = store::<TokenBucket>(1, 1);
     assert!(
         allowed(store.hit(&quota, &1, at(0), 0)),
         "a peek on an unknown key"
@@ -250,7 +250,7 @@ fn peeks_and_denied_hits_store_nothing() {
 #[test]
 fn reset_forgets_a_key() {
     let quota = quota!("1/minute");
-    let store = store::<Gcra>(10, 2);
+    let store = store::<TokenBucket>(10, 2);
     assert!(allowed(store.hit(&quota, &1, at(0), 1)));
     assert!(!allowed(store.hit(&quota, &1, at(0), 1)));
     store.reset(&1);
@@ -260,7 +260,7 @@ fn reset_forgets_a_key() {
 #[test]
 fn concurrent_hits_on_one_key_never_over_admit() {
     let quota = quota!("100/minute");
-    let store = Arc::new(MemoryStore::<u8, Gcra>::new(
+    let store = Arc::new(MemoryStore::<u8, TokenBucket>::new(
         NonZeroUsize::new(1_000).unwrap(),
     ));
     let admitted = Arc::new(AtomicU32::new(0));
@@ -285,7 +285,7 @@ fn concurrent_hits_on_one_key_never_over_admit() {
 
 #[test]
 fn shard_capacities_add_up_to_max_keys() {
-    let store = store::<Gcra>(10, 4);
+    let store = store::<TokenBucket>(10, 4);
     let capacities: Vec<usize> = store
         .shards
         .iter()
@@ -297,7 +297,7 @@ fn shard_capacities_add_up_to_max_keys() {
 #[test]
 fn a_sweep_that_frees_nothing_keeps_the_cap() {
     let quota = quota!("1/second");
-    let store = store::<Gcra>(1, 1);
+    let store = store::<TokenBucket>(1, 1);
     assert!(allowed(store.hit(&quota, &1, at(0), 1)));
     // Key 1 is hit again after going idle, so the shard's earliest idle time
     // (1 s) is now stale; key 1 is really idle at 2.5 s.
@@ -325,7 +325,7 @@ fn a_sweep_that_frees_nothing_keeps_the_cap() {
 #[test]
 fn resets_keep_the_expiry_heap_bounded() {
     let quota = quota!("1/hour");
-    let store = store::<Gcra>(4, 1);
+    let store = store::<TokenBucket>(4, 1);
     for _ in 0..1_000 {
         assert!(allowed(store.hit(&quota, &1, at(0), 1)));
         store.reset(&1);
@@ -337,12 +337,12 @@ fn resets_keep_the_expiry_heap_bounded() {
 #[test]
 #[should_panic(expected = "a quota of 2 rates in a store sized for 1")]
 fn more_rates_than_the_store_holds_panics() {
-    let store = MemoryStore::<u8, Gcra, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
+    let store = MemoryStore::<u8, TokenBucket, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
     store.hit(&quota!("2/second; 5/minute"), &1, at(0), 1);
 }
 
-fn store_when_full(max_keys: usize, policy: WhenFull) -> MemoryStore<u8, Gcra> {
-    store::<Gcra>(max_keys, 1).when_full(policy)
+fn store_when_full(max_keys: usize, policy: WhenFull) -> MemoryStore<u8, TokenBucket> {
+    store::<TokenBucket>(max_keys, 1).when_full(policy)
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn overflow_counts_new_keys_against_one_shared_quota() {
 #[test]
 #[should_panic(expected = "an overflow quota of 2 rates in a store sized for 1")]
 fn overflow_quota_with_more_rates_than_the_store_holds_panics() {
-    let store = MemoryStore::<u8, Gcra, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
+    let store = MemoryStore::<u8, TokenBucket, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
     drop(store.when_full(WhenFull::Overflow(quota!("2/second; 5/minute"))));
 }
 

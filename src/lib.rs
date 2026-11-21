@@ -8,15 +8,22 @@
 //! Named after porins, the proteins that form channels in a cell membrane and
 //! decide what passes through.
 //!
-//! Status: early development. Quotas and clocks exist; algorithms and stores
-//! are next.
+//! Status: early development. The in-memory limiter works; Redis, the tower
+//! layer and peer mode are next.
 //!
 //! ```
-//! use porin::quota;
+//! use porin::{Limiter, quota};
 //!
+//! # pollster::block_on(async {
 //! // Checked at compile time: a typo in the notation is a compile error.
-//! let api = quota!("10/second; 1000/day");
-//! assert_eq!(api.to_string(), "10/second; 1000/day");
+//! let limiter = Limiter::memory(quota!("10/second; 1000/day"));
+//!
+//! let user_id = 42_u64;
+//! if limiter.hit(&user_id).await?.is_allowed() {
+//!     // handle the request
+//! }
+//! # Ok::<(), porin::Error>(())
+//! # }).unwrap();
 //! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -26,17 +33,21 @@ mod algorithm;
 pub mod bench;
 pub mod clock;
 pub mod key;
+mod limiter;
 pub mod quota;
-#[cfg_attr(
-    all(any(not(test), loom), not(porin_bench)),
-    expect(
-        dead_code,
-        reason = "nothing public uses the stores yet; the limiter will"
-    )
-)]
 mod store;
 mod sync;
 
+pub use algorithm::fixed_window::FixedWindow;
+pub use algorithm::gcra::TokenBucket;
+pub use algorithm::sliding_log::SlidingLog;
+pub use algorithm::sliding_window::SlidingWindow;
 pub use clock::{Clock, ManualClock, MonotonicClock, Timestamp};
 pub use key::KeyEncode;
+pub use limiter::{Algorithm, Builder, Decision, Denial, Error, Limiter, NoQuota, Stats};
 pub use quota::{Quota, QuotaError, QuotaErrorKind, Rate};
+pub use store::WhenFull;
+
+/// A leaky bucket used as a meter allows exactly what a token bucket does,
+/// so it is the same type.
+pub type LeakyBucket = TokenBucket;

@@ -14,8 +14,13 @@
 use super::{Algorithm, Check, Retry, Stats, nanos};
 use crate::{Rate, Timestamp};
 
-#[derive(Debug)]
-pub(crate) struct Gcra;
+/// Token bucket: allows bursts up to the rate's burst size, then refills
+/// steadily at the rate. The default algorithm.
+///
+/// Implemented as GCRA, which keeps one timestamp per key and rate. Also
+/// known as a leaky bucket used as a meter; see [`LeakyBucket`](crate::LeakyBucket).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct TokenBucket;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GcraState {
@@ -40,7 +45,7 @@ impl GcraState {
     }
 }
 
-impl Algorithm for Gcra {
+impl Algorithm for TokenBucket {
     type State = GcraState;
     type Commit = GcraState;
 
@@ -134,9 +139,9 @@ mod tests {
     }
 
     fn hit(rate: Rate, state: &mut GcraState, now: Timestamp, cost: u32) -> Check<GcraState> {
-        let check = Gcra::check(rate, state, now, cost);
+        let check = TokenBucket::check(rate, state, now, cost);
         if let Check::Allowed { commit, .. } = check {
-            Gcra::commit(state, commit);
+            TokenBucket::commit(state, commit);
         }
         check
     }
@@ -176,7 +181,7 @@ mod tests {
             hit(rate, &mut state, at(0), 5),
             Check::Allowed { .. }
         ));
-        let Check::Allowed { stats, .. } = Gcra::check(rate, &state, at(60_000), 0) else {
+        let Check::Allowed { stats, .. } = TokenBucket::check(rate, &state, at(60_000), 0) else {
             panic!("a peek is always allowed");
         };
         assert_eq!(stats.remaining, 5);
@@ -185,7 +190,7 @@ mod tests {
 
     #[test]
     fn cost_above_burst_is_never_allowed() {
-        let check = Gcra::check(rate(10, 3), &GcraState::default(), at(0), 4);
+        let check = TokenBucket::check(rate(10, 3), &GcraState::default(), at(0), 4);
         assert!(matches!(
             check,
             Check::Denied {
@@ -199,7 +204,7 @@ mod tests {
     fn non_integer_interval_still_allows_the_full_burst() {
         // 3 per second: 333.33... ms per token, rounded up.
         let rate = rate(3, 2);
-        let check = Gcra::check(rate, &GcraState::default(), at(0), 2);
+        let check = TokenBucket::check(rate, &GcraState::default(), at(0), 2);
         assert!(matches!(check, Check::Allowed { .. }), "{check:?}");
     }
 
@@ -227,7 +232,7 @@ mod tests {
         ));
         // The clock jumps back 5 s. The TAT (11 s) is kept, so the next token
         // is 6 s away on the new reading: slower than real time, never faster.
-        let check = Gcra::check(rate, &state, at(5_000), 1);
+        let check = TokenBucket::check(rate, &state, at(5_000), 1);
         assert_eq!(
             check,
             Check::Denied {

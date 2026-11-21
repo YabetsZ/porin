@@ -7,8 +7,13 @@
 use super::{Algorithm, Check, Retry, Stats, nanos, window_start};
 use crate::{Rate, Timestamp};
 
-#[derive(Debug)]
-pub(crate) struct FixedWindow;
+/// Fixed window: counts hits in windows aligned to the period, such as each
+/// whole minute, and resets the count when a new window starts.
+///
+/// Cheapest to reason about, but a client can spend a full window at the end
+/// of one window and another at the start of the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FixedWindow;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FixedWindowState {

@@ -11,7 +11,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 
 use super::fixed_window::FixedWindow;
-use super::gcra::Gcra;
+use super::gcra::TokenBucket;
 use super::sliding_log::SlidingLog;
 use super::sliding_window::SlidingWindow;
 use super::{Algorithm, Check, Outcome, Retry, hit_quota};
@@ -244,7 +244,7 @@ proptest! {
             prop::sample::select(&PERIODS_MS[..]),
         ).prop_flat_map(|(count, burst, period_ms)| (Just(count), Just(burst), Just(period_ms), start(period_ms), ops(period_ms, burst)))
     ) {
-        let events = simulate::<Gcra>(rate(count, period_ms, burst), burst, start, &ops);
+        let events = simulate::<TokenBucket>(rate(count, period_ms, burst), burst, start, &ops);
         // Token levels scaled by the period: one token = `period` units, and
         // each nanosecond adds `count` units. Integers throughout.
         let period = u128::from(period_ms) * 1_000_000;
@@ -270,7 +270,7 @@ proptest! {
         (count, burst, period_ms, start, ops) in (1..=12_u32, 1..=12_u32, prop::sample::select(&PERIODS_MS[..]))
             .prop_flat_map(|(count, burst, period_ms)| (Just(count), Just(burst), Just(period_ms), start(period_ms), ops(period_ms, burst)))
     ) {
-        let events = simulate::<Gcra>(rate(count, period_ms, burst), burst, start, &ops);
+        let events = simulate::<TokenBucket>(rate(count, period_ms, burst), burst, start, &ops);
         let period = u128::from(period_ms) * 1_000_000;
         let allowed: Vec<_> = events.iter().filter(|event| event.allowed).collect();
         for (i, first) in allowed.iter().enumerate() {
@@ -341,7 +341,7 @@ proptest! {
     #[test]
     #[cfg_attr(miri, ignore = "too slow under Miri")]
     fn quotas_are_all_or_nothing(quota in multi_rate_quota(), ops in ops(1_000, 6)) {
-        quota_is_all_or_nothing::<Gcra>(&quota, &ops)?;
+        quota_is_all_or_nothing::<TokenBucket>(&quota, &ops)?;
         quota_is_all_or_nothing::<FixedWindow>(&quota, &ops)?;
         quota_is_all_or_nothing::<SlidingWindow>(&quota, &ops)?;
         quota_is_all_or_nothing::<SlidingLog>(&quota, &ops)?;

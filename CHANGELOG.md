@@ -13,3 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quota!`, which checks the quota notation at compile time, and `FromStr` for config files.
 - `Clock` with `MonotonicClock` and `ManualClock`, and the `Timestamp` type.
 - `KeyEncode`: a stable, collision-free byte encoding of keys for stores shared between processes.
+- `Limiter`, an in-memory rate limiter: `hit`, `hit_n`, `test`, `test_n`, `stats` and `reset`, with keys looked up by borrowed form (`&str` for `String` keys).
+- Four algorithms: `TokenBucket` (the default, alias `LeakyBucket`), `FixedWindow`, `SlidingWindow` and `SlidingLog`.
+- `Decision`, `Stats` and `Denial`, including the exact `retry_after` and whether a refusal came from a full store.
+- `max_keys` (default 1,000,000) and `WhenFull`: refuse new keys (default), evict the key nearest to idle within a window, or share an overflow quota.

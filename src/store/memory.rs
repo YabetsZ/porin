@@ -13,6 +13,7 @@
 //! rather than evicting an active one, because forgetting an active key
 //! would reset its limit and over-admit.
 
+use std::borrow::Borrow;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::hash_map::RandomState;
@@ -24,7 +25,8 @@ use std::time::Duration;
 
 use hashbrown::HashTable;
 
-use self::slot::{Slot, Stored};
+use self::slot::Slot;
+pub(crate) use self::slot::Stored;
 use super::{Hit, WhenFull};
 use crate::algorithm::Outcome;
 use crate::quota::MAX_RATES;
@@ -76,7 +78,7 @@ struct Entry<K, S> {
     slot: S,
 }
 
-impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
+impl<K: Hash + Eq, A: Stored, const N: usize> MemoryStore<K, A, N> {
     /// A store that tracks at most `max_keys` keys, split evenly across shards.
     pub(crate) fn new(max_keys: NonZeroUsize) -> Self {
         let cpus = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
@@ -136,14 +138,12 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
     /// # Panics
     ///
     /// If `quota` has more than `N` rates.
-    pub(crate) fn hit(&self, quota: &Quota, key: &K, now: Timestamp, cost: u32) -> Hit {
-        // Callers size `N` from their quota, so this never fires. Checking
-        // only the first `N` rates instead would over-admit.
-        assert!(
-            quota.rates().len() <= N,
-            "a quota of {} rates in a store sized for {N}",
-            quota.rates().len()
-        );
+    pub(crate) fn hit<Q>(&self, quota: &Quota, key: &Q, now: Timestamp, cost: u32) -> Hit
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        assert_fits::<N>(quota);
         let hash = self.hasher.hash_one(key);
         let lock = &self.shard(hash).0;
         let now_nanos = now.as_nanos();
@@ -153,7 +153,7 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
             let shard = lock.read().unwrap_or_else(PoisonError::into_inner);
             if let Some(outcome) = shard
                 .entries
-                .find(hash, |entry| entry.key == *key)
+                .find(hash, |entry| entry.key.borrow() == key)
                 .and_then(|entry| entry.slot.hit_shared(*rate, now, cost))
             {
                 return outcome.into();
@@ -164,7 +164,10 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
         // `Hash` or `Eq` impl during lookup, before any state changes, so
         // the data is still consistent and the poison can be ignored.
         let mut shard = lock.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(entry) = shard.entries.find_mut(hash, |entry| entry.key == *key) {
+        if let Some(entry) = shard
+            .entries
+            .find_mut(hash, |entry| entry.key.borrow() == key)
+        {
             return entry.slot.hit(quota, now, cost).into();
         }
 
@@ -202,20 +205,49 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
         self.insert(&mut shard, hash, key, slot, outcome)
     }
 
+    /// What [`MemoryStore::hit`] would answer, without recording anything.
+    /// A new key is judged as never hit, even if its shard is full.
+    ///
+    /// # Panics
+    ///
+    /// If `quota` has more than `N` rates.
+    pub(crate) fn test<Q>(&self, quota: &Quota, key: &Q, now: Timestamp, cost: u32) -> Hit
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        assert_fits::<N>(quota);
+        let hash = self.hasher.hash_one(key);
+        // Read guards are never poisoned by a panicking reader.
+        let shard = self
+            .shard(hash)
+            .0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let outcome = match shard.entries.find(hash, |entry| entry.key.borrow() == key) {
+            Some(entry) => entry.slot.test(quota, now, cost),
+            None => A::Slot::<N>::new().test(quota, now, cost),
+        };
+        outcome.into()
+    }
+
     /// Stores a new key whose first hit was allowed, in a shard with room.
-    fn insert(
+    fn insert<Q>(
         &self,
         shard: &mut Shard<K, A::Slot<N>>,
         hash: u64,
-        key: &K,
+        key: &Q,
         slot: A::Slot<N>,
         outcome: Outcome,
-    ) -> Hit {
+    ) -> Hit
+    where
+        Q: ToOwned<Owned = K> + ?Sized,
+    {
         shard.expiry.push(Reverse((slot.idle_at(), hash)));
         shard.entries.insert_unique(
             hash,
             Entry {
-                key: key.clone(),
+                key: key.to_owned(),
                 slot,
             },
             |entry| self.hasher.hash_one(&entry.key),
@@ -224,14 +256,21 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
     }
 
     /// Forgets `key`, as if it had never been hit.
-    pub(crate) fn reset(&self, key: &K) {
+    pub(crate) fn reset<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let hash = self.hasher.hash_one(key);
         let mut shard = self
             .shard(hash)
             .0
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        if let Ok(entry) = shard.entries.find_entry(hash, |entry| entry.key == *key) {
+        if let Ok(entry) = shard
+            .entries
+            .find_entry(hash, |entry| entry.key.borrow() == key)
+        {
             entry.remove();
             shard.drop_stale_expiry(&self.hasher);
         }
@@ -333,6 +372,16 @@ impl<K: Hash + Eq, S: Slot> Shard<K, S> {
             .map(|entry| Reverse((entry.slot.idle_at(), hasher.hash_one(&entry.key))))
             .collect();
     }
+}
+
+/// Callers size `N` from their quota, so this never fires. Checking only
+/// the first `N` rates instead would over-admit.
+fn assert_fits<const N: usize>(quota: &Quota) {
+    assert!(
+        quota.rates().len() <= N,
+        "a quota of {} rates in a store sized for {N}",
+        quota.rates().len()
+    );
 }
 
 #[cfg(test)]

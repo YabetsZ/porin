@@ -82,6 +82,25 @@ pub(crate) fn hit_quota<A: Algorithm, const N: usize>(
     now: Timestamp,
     cost: u32,
 ) -> Outcome {
+    let (outcome, commits) = check_quota::<A, N>(quota, states, now, cost);
+    if let Outcome::Allowed(_) = outcome {
+        for (state, commit) in states.iter_mut().zip(commits) {
+            if let Some(commit) = commit {
+                A::commit(state, commit);
+            }
+        }
+    }
+    outcome
+}
+
+/// What [`hit_quota`] would answer, without recording anything. On
+/// [`Outcome::Allowed`], the commits record the hit when applied in order.
+pub(crate) fn check_quota<A: Algorithm, const N: usize>(
+    quota: &Quota,
+    states: &[A::State; N],
+    now: Timestamp,
+    cost: u32,
+) -> (Outcome, [Option<A::Commit>; N]) {
     let rates = quota.rates();
     let mut commits: [Option<A::Commit>; N] = std::array::from_fn(|_| None);
     let mut summary = Stats::UNLIMITED;
@@ -103,26 +122,22 @@ pub(crate) fn hit_quota<A: Algorithm, const N: usize>(
         }
     }
 
-    if let Some(retry) = retry {
-        // Allowed rates reported stats as if the hit were recorded. It
-        // isn't, so report what every rate has without it.
-        let unchanged = rates
-            .iter()
-            .zip(states.iter())
-            .fold(Stats::UNLIMITED, |summary, (rate, state)| {
-                summary.tightest(peek_stats::<A>(*rate, state, now))
-            });
-        return Outcome::Denied {
-            stats: unchanged,
-            retry,
-        };
-    }
-    for (state, commit) in states.iter_mut().zip(commits) {
-        if let Some(commit) = commit {
-            A::commit(state, commit);
-        }
-    }
-    Outcome::Allowed(summary)
+    let Some(retry) = retry else {
+        return (Outcome::Allowed(summary), commits);
+    };
+    // Allowed rates reported stats as if the hit were recorded. It isn't,
+    // so report what every rate has without it.
+    let unchanged = rates
+        .iter()
+        .zip(states.iter())
+        .fold(Stats::UNLIMITED, |summary, (rate, state)| {
+            summary.tightest(peek_stats::<A>(*rate, state, now))
+        });
+    let denied = Outcome::Denied {
+        stats: unchanged,
+        retry,
+    };
+    (denied, std::array::from_fn(|_| None))
 }
 
 fn peek_stats<A: Algorithm>(rate: Rate, state: &A::State, now: Timestamp) -> Stats {
