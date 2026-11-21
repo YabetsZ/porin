@@ -79,6 +79,7 @@ fn timestamp_arithmetic_saturates() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "the ticker thread outlives the test by up to a tick")]
 fn coarse_clock_advances_by_ticks_and_never_goes_backwards() {
     let clock = CoarseClock::new(Duration::from_millis(1)).unwrap();
     let start = clock.now();
@@ -94,7 +95,8 @@ fn coarse_clock_advances_by_ticks_and_never_goes_backwards() {
 }
 
 #[test]
-fn coarse_clock_clones_share_time_and_short_ticks_are_raised() {
+#[cfg_attr(miri, ignore = "the ticker thread outlives the test by up to a tick")]
+fn coarse_clock_clones_share_one_ticker() {
     let clock = CoarseClock::new(Duration::ZERO).unwrap();
     let clone = clock.clone();
     std::thread::sleep(CoarseClock::MIN_TICK * 20);
@@ -105,6 +107,7 @@ fn coarse_clock_clones_share_time_and_short_ticks_are_raised() {
 
 #[cfg(feature = "quanta")]
 #[test]
+#[cfg_attr(miri, ignore = "quanta reads the CPU counter with inline assembly")]
 fn quanta_clock_moves_forward() {
     let clock = porin::QuantaClock::new();
     let start = clock.now();

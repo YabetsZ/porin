@@ -230,6 +230,7 @@ fn debug_names_the_algorithm_and_quota() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "futures-timer's helper thread outlives the test")]
 fn until_ready_waits_for_room() {
     let limiter: Limiter<u64> = Limiter::memory(quota!("100/second"));
     block_on(async {

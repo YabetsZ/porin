@@ -174,6 +174,7 @@ impl Clock for CoarseClock {
 /// ```
 /// use porin::{Limiter, QuantaClock, quota};
 ///
+/// # #[cfg(not(miri))] // quanta's inline assembly doesn't run under Miri
 /// let limiter: Limiter<u64> = Limiter::builder()
 ///     .quota(quota!("100/second"))
 ///     .clock(QuantaClock::new())
