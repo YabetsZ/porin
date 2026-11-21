@@ -73,6 +73,14 @@ impl Algorithm for FixedWindow {
     fn commit(state: &mut FixedWindowState, commit: FixedWindowState) {
         *state = commit;
     }
+
+    fn idle_at(rate: Rate, state: &FixedWindowState) -> u64 {
+        if state.used == 0 {
+            0
+        } else {
+            state.start.saturating_add(rate.period_nanos())
+        }
+    }
 }
 
 #[cfg(test)]

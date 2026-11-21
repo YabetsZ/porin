@@ -31,6 +31,12 @@ pub(crate) trait Algorithm {
     /// Records an allowed hit. `commit` must come from [`Algorithm::check`]
     /// on this same, unchanged state.
     fn commit(state: &mut Self::State, commit: Self::Commit);
+
+    /// The time from which `state` decides exactly like a never-hit state,
+    /// for every later time, if nothing more is recorded. Taken from what
+    /// the state stores, never from the caller's clock, so a hit recorded
+    /// with an older timestamp can't make a key look idle early.
+    fn idle_at(rate: Rate, state: &Self::State) -> u64;
 }
 
 /// The answer for one rate.
@@ -83,7 +89,10 @@ pub(crate) fn hit_quota<A: Algorithm, const N: usize>(
     cost: u32,
 ) -> Outcome {
     let (outcome, commits) = check_quota::<A, N>(quota, states, now, cost);
-    if let Outcome::Allowed(_) = outcome {
+    // A peek records nothing. Its commit would at most move the state to
+    // `now`, which changes nothing going forward but makes a never-hit key
+    // look hit if the clock then reads earlier.
+    if let (Outcome::Allowed(_), 1..) = (outcome, cost) {
         for (state, commit) in states.iter_mut().zip(commits) {
             if let Some(commit) = commit {
                 A::commit(state, commit);

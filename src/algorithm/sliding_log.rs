@@ -120,6 +120,14 @@ impl Algorithm for SlidingLog {
         state.entries.push_back((time, commit.cost));
         state.total = state.total.saturating_add(commit.cost);
     }
+
+    /// The newest entry is the last to leave the window.
+    fn idle_at(rate: Rate, state: &SlidingLogState) -> u64 {
+        state
+            .entries
+            .back()
+            .map_or(0, |(time, _)| time.saturating_add(rate.period_nanos()))
+    }
 }
 
 #[cfg(test)]

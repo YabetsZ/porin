@@ -101,6 +101,20 @@ impl Algorithm for SlidingWindow {
     fn commit(state: &mut SlidingWindowState, commit: SlidingWindowState) {
         *state = commit;
     }
+
+    /// The current window's count weighs on the estimate until a whole
+    /// period after that window ends; the previous one's until the current
+    /// window ends.
+    fn idle_at(rate: Rate, state: &SlidingWindowState) -> u64 {
+        let period = rate.period_nanos();
+        if state.current > 0 {
+            state.start.saturating_add(period.saturating_mul(2))
+        } else if state.previous > 0 {
+            state.start.saturating_add(period)
+        } else {
+            0
+        }
+    }
 }
 
 /// The state as seen from the window starting at `current_start`.

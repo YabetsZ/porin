@@ -90,6 +90,10 @@ impl Algorithm for TokenBucket {
     fn commit(state: &mut GcraState, commit: GcraState) {
         *state = commit;
     }
+
+    fn idle_at(_: Rate, state: &GcraState) -> u64 {
+        state.idle_at()
+    }
 }
 
 struct Bucket {

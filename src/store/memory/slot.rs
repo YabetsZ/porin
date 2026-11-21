@@ -62,10 +62,16 @@ impl<A: Algorithm, const N: usize> Slot for Locked<A, N> {
 
     fn hit(&mut self, quota: &Quota, now: Timestamp, cost: u32) -> Outcome {
         let outcome = hit_quota::<A, N>(quota, &mut self.states, now, cost);
-        if let Outcome::Allowed(stats) = outcome {
-            self.idle_at = now
-                .as_nanos()
-                .saturating_add(u64::try_from(stats.reset_after.as_nanos()).unwrap_or(u64::MAX));
+        if let Outcome::Allowed(_) = outcome {
+            // From the stored states, not from `now`: a hit recorded with an
+            // older timestamp than the last can be stored at the later time.
+            self.idle_at = quota
+                .rates()
+                .iter()
+                .zip(&self.states)
+                .map(|(rate, state)| A::idle_at(*rate, state))
+                .max()
+                .unwrap_or(0);
         }
         outcome
     }
@@ -131,6 +137,9 @@ impl<const N: usize> Slot for Atomic<N> {
         let mut current = tat.load(Ordering::Relaxed);
         loop {
             match TokenBucket::check(rate, &GcraState::from_word(current), now, cost) {
+                Check::Allowed { stats, .. } if cost == 0 => {
+                    return Some(Outcome::Allowed(stats));
+                }
                 Check::Allowed { commit, stats } => {
                     match tat.compare_exchange_weak(
                         current,

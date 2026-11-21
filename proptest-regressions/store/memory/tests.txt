@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc a1f8bdffc2c0e7199944c4b005914679505f64d5b8a7485d00e6671f9f96d2d2 # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(0, 0, 0, false), (1, 0, 0, false), (1, 0, 0, false), (0, 0, 0, false), (0, 0, 0, false), (0, 0, 1, false), (1, 0, 2, false), (2, 0, 1, false), (4, 1000000000, 4, false), (0, 28, 3, false), (5, 53480580, 2, false), (0, 370, 4, false)]
 cc 12b13130869707bc4f766c7a1b12b4a13aa4fdbc57cb8ffa1e3cb47e83e163b1 # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(3, 0, 1, false), (0, 1, 1, false), (3, 1000000000, 1, false), (2, 0, 1, false), (1, 0, 1, false), (3, 0, 0, false)]
+cc 0f661adf90b6400ef66dea9eeab88b82f8c4d66f9e453d0440aa1a5415f68e72 # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(2, 0, 0), (2, -1, 0)]
+cc 9503f3ced63f0f8b8f87952a2d08c351ea248a38cc648f550a3d4a259f575489 # shrinks to ops = [(4, 0, 0), (0, -235826794, 0), (4, 0, 0)]
+cc 541102e700a1549198776054c1b5f53f7e38d66a3854f744704b8d0d1f6634ea # shrinks to quota = Quota([Rate { count: 3, burst: 3, period_ms: 1000 }]), ops = [(2, 318066376, 0), (0, 234954815, 0), (2, 244834358, 0), (2, 310548384, 0), (0, 624, 0), (2, 0, 0), (1, 0, 0), (0, -1, 0), (0, -138962129, 0), (0, 0, 1)]

@@ -304,6 +304,9 @@ where
             Outcome::Denied { .. } => {
                 prop_assert_eq!(&states, &before, "a denied hit changed state");
             }
+            Outcome::Allowed(_) if cost == 0 => {
+                prop_assert_eq!(&states, &before, "a peek changed state");
+            }
             Outcome::Allowed(_) => {
                 for ((rate, state), old) in quota.rates().iter().zip(&states).zip(&before) {
                     let mut alone = old.clone();
@@ -345,5 +348,84 @@ proptest! {
         quota_is_all_or_nothing::<FixedWindow>(&quota, &ops)?;
         quota_is_all_or_nothing::<SlidingWindow>(&quota, &ops)?;
         quota_is_all_or_nothing::<SlidingLog>(&quota, &ops)?;
+    }
+}
+
+/// What a check decided, without the commit, whose form can differ between
+/// two states that decide alike.
+fn decision<C>(check: &Check<C>) -> (bool, super::Stats, Option<Retry>) {
+    match check {
+        Check::Allowed { stats, .. } => (true, *stats, None),
+        Check::Denied { stats, retry } => (false, *stats, Some(*retry)),
+    }
+}
+
+/// Records `before` at arbitrary times, including backwards ones. From
+/// `idle_at` on (and no earlier than the newest time recorded, since an
+/// earlier time is a clock going backwards, where a state only ever allows
+/// less), the state must decide every later hit exactly like a never-hit
+/// state: evicting it then changes nothing.
+fn idle_state_decides_like_a_new_one<A: Algorithm>(
+    rate: Rate,
+    before: &[(u64, u32)],
+    after: &[(u64, u32)],
+) -> Result<(), TestCaseError> {
+    let mut state = A::State::default();
+    for &(time, cost) in before {
+        if let Check::Allowed { commit, .. } =
+            A::check(rate, &state, Timestamp::from_nanos(time), cost)
+        {
+            A::commit(&mut state, commit);
+        }
+    }
+    let idle = A::idle_at(rate, &state);
+    let newest = before.iter().map(|&(time, _)| time).max().unwrap_or(0);
+    let mut fresh = A::State::default();
+    let mut now = idle.max(newest);
+    for &(advance, cost) in after {
+        now += advance;
+        let at = Timestamp::from_nanos(now);
+        let (old, new) = (
+            A::check(rate, &state, at, cost),
+            A::check(rate, &fresh, at, cost),
+        );
+        prop_assert_eq!(
+            decision(&old),
+            decision(&new),
+            "at {} (idle at {}), cost {}",
+            now,
+            idle,
+            cost
+        );
+        if let (Check::Allowed { commit: a, .. }, Check::Allowed { commit: b, .. }) = (old, new) {
+            A::commit(&mut state, a);
+            A::commit(&mut fresh, b);
+        }
+    }
+    Ok(())
+}
+
+/// Hit times anywhere in a few periods, in any order.
+fn shuffled_hits(period_ms: u64) -> impl Strategy<Value = Vec<(u64, u32)>> {
+    let span = period_ms * 1_000_000 * 4;
+    prop::collection::vec((0..span, 0..=5_u32), 0..40)
+}
+
+proptest! {
+    #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn idle_states_decide_like_new_ones(
+        count in 1..=6_u32,
+        period_ms in prop::sample::select(&PERIODS_MS[..]),
+        burst in 1..=8_u32,
+        before in shuffled_hits(1_000),
+        after in ops(1_000, 6),
+    ) {
+        let token = rate(count, period_ms, burst);
+        let window = rate(count, period_ms, count);
+        idle_state_decides_like_a_new_one::<TokenBucket>(token, &before, &after)?;
+        idle_state_decides_like_a_new_one::<FixedWindow>(window, &before, &after)?;
+        idle_state_decides_like_a_new_one::<SlidingWindow>(window, &before, &after)?;
+        idle_state_decides_like_a_new_one::<SlidingLog>(window, &before, &after)?;
     }
 }

@@ -7,3 +7,5 @@
 cc 682f8e1c9ba4e7b9d5f5ef3701a840e5de15abddf27d2831606ecd09d4937c50 # shrinks to (count, period_ms, start, ops) = (2, 1, 249998, [(1750002, 2), (0, 1)])
 cc 1a1d3a3b867ccd1db21fe9b4e68dc024f92a240e1cf0d83110533c189cb857c3 # shrinks to (count, burst, period_ms, start, ops) = (1, 1, 1, 0, [(0, 1), (1, 1), (1, 1)])
 cc 7fbbeb3eb85414bb5e17ea1bd24aaa71f084ce17ead36505873cfd528b18d549 # shrinks to (count, burst, period_ms, start, ops) = (9, 2, 1000, 0, [(0, 1)])
+cc fd222e48743ddb3fa9432dd31890abbe28603c6cc35523b8b62a203034a58aea # shrinks to count = 1, period_ms = 1, burst = 1, before = [(251000000, 0)], after = [(0, 1)]
+cc 65db0d392e770b28e63d0fb9095cac78fa27f3daba20b8ef393a747faaf7e979 # shrinks to count = 6, period_ms = 60000, burst = 1, before = [(0, 1), (1625000003, 1)], after = [(0, 1)]
