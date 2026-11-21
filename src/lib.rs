@@ -29,7 +29,9 @@
 )]
 mod algorithm;
 pub mod clock;
+pub mod key;
 pub mod quota;
 
 pub use clock::{Clock, ManualClock, MonotonicClock, Timestamp};
+pub use key::KeyEncode;
 pub use quota::{Quota, QuotaError, QuotaErrorKind, Rate};

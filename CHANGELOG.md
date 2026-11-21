@@ -12,3 +12,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Quota` and `Rate`: up to four limits per quota, with optional token bucket bursts.
 - `quota!`, which checks the quota notation at compile time, and `FromStr` for config files.
 - `Clock` with `MonotonicClock` and `ManualClock`, and the `Timestamp` type.
+- `KeyEncode`: a stable, collision-free byte encoding of keys for stores shared between processes.

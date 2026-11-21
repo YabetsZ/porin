@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aafbab529f7195e9188ace7db366bdfcf75d600e64f8f41ef948201c24521ae9 # shrinks to bytes = [], options = [], nested = [[""], []]
+cc 3c794cd93179d67e347a99436f0e77b53fe8e3cbf41d31b3649a4720f6a278ec # shrinks to strings = [], pairs = [], triples = [("", "", ""), ("", "", "a")]
+cc f7b817a0fd0825491d189c87f0118dcd2cf178342cfa8d86cc1def6149f2d88b # shrinks to tenants = [], signed = [], ips = [], lengths = [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 161, 33, 35, 196, 115, 192, 15, 93, 238, 96, 88, 208, 216, 63, 190, 236, 114, 223, 159, 148, 202, 37, 25, 230, 14, 225, 160, 167, 110, 2, 64, 166, 18, 207, 34, 129, 64, 91, 79, 160, 195, 6, 176, 242, 82, 133, 29, 100, 141, 144, 111, 21, 206, 87, 135, 109, 4, 183, 24, 131, 145, 58, 172, 149, 108, 122, 179, 147, 56, 252, 189, 234, 105, 153, 84, 61, 115, 149, 112, 229, 204, 171, 19, 140, 74, 228, 223, 150, 81, 42, 220, 199, 220, 50, 154, 93, 56, 149, 188, 225, 127, 76]]
