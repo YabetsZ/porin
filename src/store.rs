@@ -4,7 +4,25 @@ pub(crate) mod memory;
 
 use std::time::Duration;
 
+use crate::Quota;
 use crate::algorithm::{Outcome, Retry, Stats};
+
+/// What a store does with a new key when it has no room: every key it
+/// tracks is still active, and forgetting an active key resets its limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WhenFull {
+    /// Refuse the new key until a tracked key goes idle. Never over-admits;
+    /// new keys wait during a flood of keys, while known keys keep working.
+    #[default]
+    Refuse,
+    /// Forget the tracked key nearest to going idle, if it goes idle within
+    /// `within`; otherwise refuse. That key starts over early, so it may
+    /// over-admit by up to `within` worth of refill.
+    EvictNearestIdle { within: Duration },
+    /// Count new keys that don't fit against this one shared quota. Never
+    /// over-admits beyond it, but those keys share one limit.
+    Overflow(Quota),
+}
 
 /// A store's answer to one hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -15,6 +15,7 @@
 mod benches {
     use std::cell::Cell;
     use std::num::NonZeroU32;
+    use std::time::Duration;
 
     use divan::Bencher;
     use porin::bench::{AlgorithmState, Store};
@@ -169,6 +170,28 @@ mod benches {
         fn steady_churn(bencher: Bencher<'_, '_>, max_keys: usize) {
             let quota = quota!("1/second");
             let store = Store::<u64>::new(max_keys);
+            let mut now = 0_u64;
+            let mut key = 0_u64;
+            let mut arrive = move || {
+                now += 10_000;
+                key += 1;
+                store.hit(&quota, &key, Timestamp::from_nanos(now))
+            };
+            for _ in 0..300_000 {
+                arrive();
+            }
+            bencher.bench_local(arrive);
+        }
+
+        /// The same churn with room for 65k, under each full-store policy.
+        #[divan::bench(args = ["refuse", "evict_nearest_idle", "overflow"])]
+        fn steady_churn_policy(bencher: Bencher<'_, '_>, policy: &str) {
+            let quota = quota!("1/second");
+            let store = match policy {
+                "evict_nearest_idle" => Store::<u64>::evicting(65_536, Duration::from_millis(100)),
+                "overflow" => Store::<u64>::overflowing(65_536, quota!("1000/second")),
+                _ => Store::<u64>::new(65_536),
+            };
             let mut now = 0_u64;
             let mut key = 0_u64;
             let mut arrive = move || {

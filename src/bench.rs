@@ -4,14 +4,15 @@
 
 use std::hash::Hash;
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use crate::algorithm::fixed_window::{FixedWindow, FixedWindowState};
 use crate::algorithm::gcra::{Gcra, GcraState};
 use crate::algorithm::sliding_log::{SlidingLog, SlidingLogState};
 use crate::algorithm::sliding_window::{SlidingWindow, SlidingWindowState};
 use crate::algorithm::{Algorithm, Check};
-use crate::store::Hit;
 use crate::store::memory::MemoryStore;
+use crate::store::{Hit, WhenFull};
 use crate::{Quota, Rate, Timestamp};
 
 /// The in-memory store with the token bucket, sized for single-rate quotas.
@@ -25,6 +26,25 @@ impl<K: Hash + Eq + Clone> Store<K> {
         Self(MemoryStore::new(
             NonZeroUsize::new(max_keys).unwrap_or(NonZeroUsize::MIN),
         ))
+    }
+
+    /// Like [`Store::new`], but a full store forgets the key nearest to
+    /// idle if it goes idle within `within`.
+    #[must_use]
+    pub fn evicting(max_keys: usize, within: Duration) -> Self {
+        let Self(store) = Self::new(max_keys);
+        Self(store.when_full(WhenFull::EvictNearestIdle { within }))
+    }
+
+    /// Like [`Store::new`], but new keys that don't fit share `overflow`.
+    ///
+    /// # Panics
+    ///
+    /// If `overflow` has more than one rate.
+    #[must_use]
+    pub fn overflowing(max_keys: usize, overflow: Quota) -> Self {
+        let Self(store) = Self::new(max_keys);
+        Self(store.when_full(WhenFull::Overflow(overflow)))
     }
 
     /// Spends one unit; returns whether it was allowed.
@@ -41,10 +61,10 @@ impl<K: Hash + Eq + Clone> Store<K> {
         self.0.reset(key);
     }
 
-    /// Hits refused because the store was full.
+    /// New keys that found the store full.
     #[must_use]
-    pub fn full_refusals(&self) -> u64 {
-        self.0.full_refusals()
+    pub fn full_hits(&self) -> u64 {
+        self.0.full_hits()
     }
 }
 

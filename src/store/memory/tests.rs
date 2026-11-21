@@ -18,7 +18,7 @@ use crate::algorithm::gcra::Gcra;
 use crate::algorithm::sliding_log::SlidingLog;
 use crate::algorithm::{Outcome, Retry, hit_quota};
 use crate::quota::MAX_RATES;
-use crate::store::Hit;
+use crate::store::{Hit, WhenFull};
 use crate::{Quota, Timestamp, quota};
 
 fn store<A: Stored>(max_keys: usize, shards: usize) -> MemoryStore<u8, A> {
@@ -196,7 +196,7 @@ fn full_store_refuses_new_keys_until_one_goes_idle() {
         },
         "key 1 goes idle at 1 s"
     );
-    assert_eq!(store.full_refusals(), 1);
+    assert_eq!(store.full_hits(), 1);
     // Known keys keep working while the store is full.
     assert!(!allowed(store.hit(&quota, &1, at(600), 1)));
     // Key 1 is idle at 1 s, so key 3 takes its place.
@@ -315,7 +315,7 @@ fn a_sweep_that_frees_nothing_keeps_the_cap() {
         },
         "the second refusal skips the sweep: nothing can be idle before 2.5 s"
     );
-    assert_eq!(store.full_refusals(), 2);
+    assert_eq!(store.full_hits(), 2);
     assert!(
         allowed(store.hit(&quota, &2, at(3_000), 1)),
         "well past key 1's idle time"
@@ -339,4 +339,95 @@ fn resets_keep_the_expiry_heap_bounded() {
 fn more_rates_than_the_store_holds_panics() {
     let store = MemoryStore::<u8, Gcra, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
     store.hit(&quota!("2/second; 5/minute"), &1, at(0), 1);
+}
+
+fn store_when_full(max_keys: usize, policy: WhenFull) -> MemoryStore<u8, Gcra> {
+    store::<Gcra>(max_keys, 1).when_full(policy)
+}
+
+#[test]
+fn evict_nearest_idle_takes_the_key_nearest_to_idle() {
+    let quota = quota!("1/second burst 2");
+    // Both keys go idle within the window; only the nearest may go.
+    let store = store_when_full(
+        2,
+        WhenFull::EvictNearestIdle {
+            within: Duration::from_millis(1_500),
+        },
+    );
+    assert!(allowed(store.hit(&quota, &1, at(0), 1)), "idle at 1 s");
+    // Hit again before going idle: key 1's expiry item (1 s) is now stale,
+    // and it is really idle at 2 s.
+    assert!(allowed(store.hit(&quota, &1, at(500), 1)));
+    assert!(allowed(store.hit(&quota, &2, at(600), 1)), "idle at 1.6 s");
+    assert!(allowed(store.hit(&quota, &3, at(900), 1)), "evicts key 2");
+    assert!(
+        !allowed(store.hit(&quota, &1, at(900), 1)),
+        "key 1 was kept, so its limit still holds"
+    );
+    assert_eq!(store.full_hits(), 1);
+}
+
+#[test]
+fn evict_nearest_idle_refuses_keys_further_from_idle() {
+    let quota = quota!("1/second");
+    let store = store_when_full(
+        1,
+        WhenFull::EvictNearestIdle {
+            within: Duration::from_millis(100),
+        },
+    );
+    assert!(allowed(store.hit(&quota, &1, at(0), 1)));
+    assert_eq!(
+        store.hit(&quota, &2, at(800), 1),
+        Hit::Full {
+            retry_after: Duration::from_millis(200)
+        },
+        "key 1 is 200 ms from idle, beyond the 100 ms allowed"
+    );
+    assert!(
+        allowed(store.hit(&quota, &2, at(900), 1)),
+        "now key 1 is within 100 ms"
+    );
+}
+
+#[test]
+fn overflow_counts_new_keys_against_one_shared_quota() {
+    let quota = quota!("1/second");
+    let store = store_when_full(1, WhenFull::Overflow(quota!("2/second")));
+    assert!(allowed(store.hit(&quota, &1, at(0), 1)));
+    assert!(allowed(store.hit(&quota, &2, at(0), 1)), "overflow: 1 of 2");
+    assert!(allowed(store.hit(&quota, &3, at(0), 1)), "overflow: 2 of 2");
+    assert!(matches!(
+        store.hit(&quota, &4, at(0), 1),
+        Hit::Denied {
+            retry: Retry::After(_),
+            ..
+        }
+    ));
+    assert!(
+        !allowed(store.hit(&quota, &1, at(0), 1)),
+        "the known key keeps its own limit"
+    );
+    assert_eq!(store.full_hits(), 3);
+    assert!(
+        allowed(store.hit(&quota, &5, at(1_000), 1)),
+        "key 1 went idle, so key 5 is stored normally"
+    );
+}
+
+#[test]
+#[should_panic(expected = "an overflow quota of 2 rates in a store sized for 1")]
+fn overflow_quota_with_more_rates_than_the_store_holds_panics() {
+    let store = MemoryStore::<u8, Gcra, 1>::with_shards(NonZeroUsize::new(4).unwrap(), 1);
+    drop(store.when_full(WhenFull::Overflow(quota!("2/second; 5/minute"))));
+}
+
+#[test]
+fn debug_shows_the_policy_and_full_hits() {
+    let store = store_when_full(4, WhenFull::Refuse);
+    assert_eq!(
+        format!("{store:?}"),
+        "MemoryStore { shards: 1, when_full: Refuse, full_hits: 0, .. }"
+    );
 }

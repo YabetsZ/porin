@@ -8,7 +8,8 @@
 //!
 //! The number of tracked keys is capped. When a shard is full, keys that are
 //! back to their never-hit state are evicted, earliest first; removing them
-//! changes no decision. If every key in the shard is still active, a new key is refused
+//! changes no decision. If every key in the shard is still active, the
+//! store's [`WhenFull`] policy decides; by default the new key is refused
 //! rather than evicting an active one, because forgetting an active key
 //! would reset its limit and over-admit.
 
@@ -24,10 +25,10 @@ use std::time::Duration;
 use hashbrown::HashTable;
 
 use self::slot::{Slot, Stored};
-use super::Hit;
+use super::{Hit, WhenFull};
 use crate::algorithm::Outcome;
 use crate::quota::MAX_RATES;
-use crate::sync::{AtomicU64, RwLock};
+use crate::sync::{AtomicU64, Mutex, RwLock};
 use crate::{Quota, Timestamp};
 
 mod slot;
@@ -44,8 +45,11 @@ pub(crate) struct MemoryStore<K, A: Stored, const N: usize = MAX_RATES> {
     /// randomly seeded `SipHash`, so attacker-chosen keys can't be crafted
     /// to collide.
     hasher: RandomState,
-    /// Hits refused because a shard was full of active keys.
-    full_refusals: AtomicU64,
+    when_full: WhenFull,
+    /// The shared state for [`WhenFull::Overflow`].
+    overflow: Option<Mutex<A::Slot<N>>>,
+    /// New keys that found their shard full of active keys.
+    full_hits: AtomicU64,
 }
 
 type Shards<K, S> = Box<[CacheLine<RwLock<Shard<K, S>>>]>;
@@ -99,8 +103,31 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
         Self {
             shards,
             hasher: RandomState::new(),
-            full_refusals: AtomicU64::new(0),
+            when_full: WhenFull::Refuse,
+            overflow: None,
+            full_hits: AtomicU64::new(0),
         }
+    }
+
+    /// Sets what happens to new keys when a shard has no room.
+    ///
+    /// # Panics
+    ///
+    /// If an overflow quota has more than `N` rates.
+    pub(crate) fn when_full(mut self, policy: WhenFull) -> Self {
+        self.overflow = match policy {
+            WhenFull::Overflow(quota) => {
+                assert!(
+                    quota.rates().len() <= N,
+                    "an overflow quota of {} rates in a store sized for {N}",
+                    quota.rates().len()
+                );
+                Some(Mutex::new(A::Slot::<N>::new()))
+            }
+            WhenFull::Refuse | WhenFull::EvictNearestIdle { .. } => None,
+        };
+        self.when_full = policy;
+        self
     }
 
     /// Spends `cost` units for `key` at `now`, if every rate allows it. A
@@ -151,13 +178,39 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
         if stats.reset_after.is_zero() {
             return outcome.into();
         }
-        if !shard.make_room(now_nanos, &self.hasher) {
+        if !shard.make_room(now_nanos, now_nanos, &self.hasher) {
             // Relaxed: a statistics counter that orders nothing else.
-            self.full_refusals.fetch_add(1, Ordering::Relaxed);
-            return Hit::Full {
-                retry_after: Duration::from_nanos(shard.next_idle().saturating_sub(now_nanos)),
+            self.full_hits.fetch_add(1, Ordering::Relaxed);
+            if let WhenFull::EvictNearestIdle { within } = self.when_full {
+                let until =
+                    now_nanos.saturating_add(u64::try_from(within.as_nanos()).unwrap_or(u64::MAX));
+                if shard.make_room(now_nanos, until, &self.hasher) {
+                    return self.insert(&mut shard, hash, key, slot, outcome);
+                }
+            }
+            let retry_after = Duration::from_nanos(shard.next_idle().saturating_sub(now_nanos));
+            drop(shard);
+            return match (&self.overflow, self.when_full) {
+                (Some(overflow), WhenFull::Overflow(overflow_quota)) => overflow
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .hit(&overflow_quota, now, cost)
+                    .into(),
+                _ => Hit::Full { retry_after },
             };
         }
+        self.insert(&mut shard, hash, key, slot, outcome)
+    }
+
+    /// Stores a new key whose first hit was allowed, in a shard with room.
+    fn insert(
+        &self,
+        shard: &mut Shard<K, A::Slot<N>>,
+        hash: u64,
+        key: &K,
+        slot: A::Slot<N>,
+        outcome: Outcome,
+    ) -> Hit {
         shard.expiry.push(Reverse((slot.idle_at(), hash)));
         shard.entries.insert_unique(
             hash,
@@ -184,9 +237,10 @@ impl<K: Hash + Eq + Clone, A: Stored, const N: usize> MemoryStore<K, A, N> {
         }
     }
 
-    /// Hits refused so far because the store was full of active keys.
-    pub(crate) fn full_refusals(&self) -> u64 {
-        self.full_refusals.load(Ordering::Relaxed)
+    /// New keys so far that found their shard full of active keys, whatever
+    /// the [`WhenFull`] policy then did with them.
+    pub(crate) fn full_hits(&self) -> u64 {
+        self.full_hits.load(Ordering::Relaxed)
     }
 
     fn shard(&self, hash: u64) -> &CacheLine<RwLock<Shard<K, A::Slot<N>>>> {
@@ -209,32 +263,39 @@ impl<K, A: Stored, const N: usize> std::fmt::Debug for MemoryStore<K, A, N> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryStore")
             .field("shards", &self.shards.len())
-            .field("full_refusals", &self.full_refusals.load(Ordering::Relaxed))
+            .field("when_full", &self.when_full)
+            .field("full_hits", &self.full_hits.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
 
 impl<K: Hash + Eq, S: Slot> Shard<K, S> {
-    /// Evicts idle entries, earliest first, until there is room for one
-    /// more. Returns false if every entry is still active. Only entries
-    /// whose idle time has passed are removed, so no decision changes.
-    fn make_room(&mut self, now: u64, hasher: &RandomState) -> bool {
+    /// Evicts entries until there is room for one more, and returns false
+    /// if it can't. Idle entries go first, in any order; removing them
+    /// changes no decision. Then, while room is still short, the entry
+    /// nearest to idle goes, if it goes idle by `until`. With `until == now`
+    /// only idle entries are evicted.
+    fn make_room(&mut self, now: u64, until: u64, hasher: &RandomState) -> bool {
         while self.entries.len() >= self.capacity {
             let Some(&Reverse((idle_at, hash))) = self.expiry.peek() else {
                 return false;
             };
-            if idle_at > now {
+            if idle_at > until {
                 return false;
             }
             self.expiry.pop();
             // The item names a hash, not a key: rehashing tells apart keys
             // that share a slot group. Sweeps are rare, so the cost is fine.
             let has_hash = |entry: &Entry<K, S>| hasher.hash_one(&entry.key) == hash;
-            if let Ok(idle) = self
-                .entries
-                .find_entry(hash, |entry| entry.slot.idle_at() <= now && has_hash(entry))
-            {
-                idle.remove();
+            // An entry is evicted if it is idle, or if this item is current
+            // for it: items are lower bounds, so a current item at the top
+            // of the heap belongs to the entry nearest to idle.
+            let evictable = |entry: &Entry<K, S>| {
+                let entry_idle = entry.slot.idle_at();
+                (entry_idle <= now || entry_idle <= idle_at) && has_hash(entry)
+            };
+            if let Ok(victim) = self.entries.find_entry(hash, evictable) {
+                victim.remove();
             } else if let Some(next) = self
                 .entries
                 .iter_hash(hash)
@@ -243,8 +304,8 @@ impl<K: Hash + Eq, S: Slot> Shard<K, S> {
                 .min()
             {
                 // Hit again since the item was pushed: reschedule it. No
-                // entry with this hash is idle, so `next > now` and the loop
-                // ends.
+                // entry with this hash was evictable, so `next > idle_at`
+                // and the item moves down the heap; the loop ends.
                 self.expiry.push(Reverse((next, hash)));
             }
         }
