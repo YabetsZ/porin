@@ -283,3 +283,65 @@ fn an_overflow_denial_is_a_store_full_denial_with_a_retry_time() {
         );
     });
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "real-time waits are too slow under Miri")]
+fn concurrent_waiters_all_finish_and_never_over_admit() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    // A burst of 50, then one every 10 ms: 100 hits need at least 500 ms.
+    let limiter: Limiter<u64> = Limiter::memory(quota!("100/second burst 50"));
+    let start = Instant::now();
+    let granted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let threads: Vec<_> = (0..20)
+        .map(|_| {
+            let limiter = limiter.clone();
+            let granted = Arc::clone(&granted);
+            std::thread::spawn(move || {
+                for _ in 0..5 {
+                    assert!(allowed(block_on(limiter.until_ready(&1))));
+                    granted.lock().unwrap().push(start.elapsed());
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let mut granted = granted.lock().unwrap().clone();
+    granted.sort();
+    assert_eq!(granted.len(), 100);
+    // By any time t, at most the burst plus one per 10 ms were granted.
+    for (index, at) in granted.iter().enumerate() {
+        let allowance = (at.as_millis() / 10).saturating_add(51);
+        assert!(
+            u128::try_from(index).unwrap() < allowance,
+            "grant {index} at {at:?} exceeds the allowance {allowance}"
+        );
+    }
+    assert!(
+        start.elapsed() >= Duration::from_millis(490),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_dropped_wait_spends_nothing() {
+    use std::pin::pin;
+    use std::task::{Context, Waker};
+
+    let limiter: Limiter<u64> = Limiter::memory(quota!("1/minute"));
+    assert!(allowed(block_on(limiter.hit(&1))));
+    {
+        let mut waiting = pin!(limiter.until_ready(&1));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut context).is_pending(), "it waits");
+    }
+    // Dropped while waiting: the unit it was waiting for is still there to
+    // spend once it refills, and nothing more was taken.
+    let stats = block_on(limiter.stats(&1)).unwrap();
+    assert_eq!(stats.remaining(), 0);
+    assert!(stats.reset_after() > Duration::from_secs(59));
+}
