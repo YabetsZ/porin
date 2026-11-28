@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-11-28
+
+The Redis store. The API may still change before 0.1.0.
+
 ### Added
 
 - `RedisStore` (features `redis-tokio` and `redis-smol`): limiters shared by every instance through a single Redis server, a Sentinel-managed primary or a Cluster. Each decision is one Lua script that Redis runs atomically, timed by Redis's own clock; keys expire once idle. A sliding log is a sorted set per rate, so a decision costs a few lookups however many entries the window holds.
@@ -21,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Error` has its first variants: `Error::Store` and `Error::KeyTooLong`.
 - The `store` module is public, holding `Memory`, `RedisStore` and the failure policies.
+
+### Fixed
+
+- A sliding log denial whose units in use plus cost passed `u32::MAX` reported a `retry_after` too early.
 
 ## [0.1.0-alpha.1] - 2026-11-21
 
@@ -42,5 +50,6 @@ First release, to reserve the name. The in-memory limiter is usable; the API may
 - Feature `memory` (on by default) for the in-memory limiter; without it only quotas, clocks and keys remain.
 - `blocking::Limiter` (feature `blocking`) for code without an async runtime. It shares state with the async `Limiter` it converts from.
 
-[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/YabetsZ/porin/releases/tag/v0.1.0-alpha.1
