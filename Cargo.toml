@@ -73,5 +73,10 @@ name = "compare"
 harness = false
 required-features = ["memory"]
 
+[[bench]]
+name = "redis"
+harness = false
+required-features = ["redis-tokio"]
+
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
