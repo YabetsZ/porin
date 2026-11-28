@@ -328,6 +328,7 @@ fn concurrent_waiters_all_finish_and_never_over_admit() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "futures-timer's helper thread outlives the test")]
 fn a_dropped_wait_spends_nothing() {
     use std::pin::pin;
     use std::task::{Context, Waker};
