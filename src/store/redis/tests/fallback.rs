@@ -97,6 +97,7 @@ async fn outages_get_the_divided_quota_exactly_and_marked() {
         limiter.hit(&2).await.unwrap().is_allowed(),
         "other keys have their own share"
     );
+    assert_eq!(redis.policy_answers(), 24);
 }
 
 #[test]
@@ -170,10 +171,12 @@ async fn redis_answers_never_touch_the_fallback() {
     let back = limiter.hit(&1).await.unwrap();
     assert!(back.is_allowed() && back.stats().is_known());
     assert_eq!(back.stats().remaining(), 0);
+    let answers = redis.policy_answers();
     let Decision::Denied(denial) = limiter.hit(&1).await.unwrap() else {
         panic!("Redis denies the fourth hit");
     };
     assert!(denial.stats().is_known() && !denial.stats().is_fallback());
+    assert_eq!(redis.policy_answers(), answers, "Redis answered it");
 }
 
 #[tokio::test]
@@ -208,6 +211,7 @@ async fn permanent_errors_and_resets_stay_errors() {
     for _ in 0..3 {
         assert!(matches!(limiter.hit(&1).await, Err(Error::Store(_))));
     }
+    assert_eq!(redis.policy_answers(), 0, "the fallback never answered");
 
     server.stop();
     assert!(limiter.hit(&2).await.unwrap().stats().is_fallback());

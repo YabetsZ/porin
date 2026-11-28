@@ -3,6 +3,7 @@
 
 pub(crate) mod breaker;
 mod deny_cache;
+pub(crate) mod event;
 pub(crate) mod fallback;
 pub(crate) mod scripts;
 #[cfg(test)]
@@ -11,6 +12,7 @@ pub(crate) mod tests;
 use std::fmt;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -22,6 +24,7 @@ use ::redis::{Cmd, ConnectionAddr, IntoConnectionInfo, Pipeline, RedisFuture, Tl
 
 use self::breaker::{Breaker, CircuitBreaker};
 use self::deny_cache::DenyCache;
+use self::event::Event;
 use self::fallback::Fallback;
 use self::scripts::Scripted;
 use super::{FailurePolicy, Policy, sealed};
@@ -51,7 +54,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// [`FailOver`](super::FailOver) to a smaller limit kept in memory on each
 /// instance. After 3 failures in a row the store stops asking Redis for a
 /// while, growing from 100 ms to 5 s, and answers by `P` at once; see
-/// [`CircuitBreaker`].
+/// [`CircuitBreaker`]. [`on_event`](RedisStoreBuilder::on_event) reports
+/// when that happens, and [`policy_answers`](Self::policy_answers) counts
+/// the answers `P` gave.
 ///
 /// A hit that timed out may still reach a slow Redis and be recorded after
 /// its caller got the policy's answer. It then spends units the caller may
@@ -112,10 +117,16 @@ struct Shared {
     timeout: Duration,
     on_failure: OnFailure,
     deny_cache: Option<DenyCache>,
+    on_event: Option<Hook>,
     /// Times the deny cache and the fallback read; monotonic, local to this
     /// instance.
     clock: MonotonicClock,
+    /// Calls answered by the failure policy. A statistics counter that
+    /// orders nothing else, so `Relaxed`.
+    policy_answers: AtomicU64,
 }
+
+type Hook = Box<dyn Fn(Event) + Send + Sync>;
 
 /// The failure policy, with any state it keeps.
 enum OnFailure {
@@ -229,15 +240,16 @@ pub struct RedisStoreBuilder<P, T = Direct> {
     breaker: CircuitBreaker,
     policy: P,
     deny_cache: Option<NonZeroUsize>,
+    on_event: Option<Hook>,
 }
 
 /// What `connect` passes on to the store.
-#[derive(Clone, Copy)]
 struct Settings {
     policy: Policy,
     timeout: Duration,
     breaker: CircuitBreaker,
     deny_cache: Option<NonZeroUsize>,
+    on_event: Option<Hook>,
 }
 
 impl RedisStore<NoPolicy> {
@@ -301,6 +313,7 @@ impl<T> RedisStoreBuilder<NoPolicy, T> {
             breaker: CircuitBreaker::new(),
             policy: NoPolicy,
             deny_cache: None,
+            on_event: None,
         }
     }
 }
@@ -315,6 +328,7 @@ impl<P, T> RedisStoreBuilder<P, T> {
             breaker: self.breaker,
             policy,
             deny_cache: self.deny_cache,
+            on_event: self.on_event,
         }
     }
 
@@ -380,6 +394,41 @@ impl<P, T> RedisStoreBuilder<P, T> {
         self.deny_cache = Some(max_keys);
         self
     }
+
+    /// Calls `hook` with each [`Event`]: the circuit breaker opening and
+    /// closing, and the store connecting again, for logs and alerts. Count
+    /// the answers the failure policy gave with
+    /// [`RedisStore::policy_answers`].
+    ///
+    /// The hook runs on the call that caused the event, after the store
+    /// has updated its own state, so keep it short: log, bump a metric, or
+    /// send to a channel. If it panics, the panic reaches that call; the
+    /// store itself stays consistent.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use porin::store::{Event, FailClosed, RedisStore};
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let redis = RedisStore::builder("redis://127.0.0.1/")
+    ///     .on_failure(FailClosed)
+    ///     .on_event(|event| match event {
+    ///         Event::BreakerOpened { open_for } => {
+    ///             eprintln!("Redis is failing; skipping it for {open_for:?}");
+    ///         }
+    ///         Event::BreakerClosed => eprintln!("Redis is back"),
+    ///         _ => {}
+    ///     })
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_event(mut self, hook: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        self.on_event = Some(Box::new(hook));
+        self
+    }
 }
 
 impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
@@ -389,6 +438,7 @@ impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
             timeout: self.timeout,
             breaker: self.breaker,
             deny_cache: self.deny_cache,
+            on_event: self.on_event,
         };
         (self.target, settings)
     }
@@ -597,6 +647,7 @@ impl<P> RedisStore<P> {
             timeout,
             breaker,
             deny_cache,
+            on_event,
         } = settings;
         Self {
             shared: Arc::new(Shared {
@@ -611,10 +662,22 @@ impl<P> RedisStore<P> {
                 timeout,
                 on_failure: policy.into(),
                 deny_cache: deny_cache.map(DenyCache::new),
+                on_event,
                 clock: MonotonicClock::new(),
+                policy_answers: AtomicU64::new(0),
             }),
             policy: PhantomData,
         }
+    }
+
+    /// How many calls so far the failure policy answered instead of Redis,
+    /// including errors under [`Propagate`](super::Propagate) and answers
+    /// from [`FailOver`](super::FailOver)'s fallback. Errors that every
+    /// policy returns, such as refused credentials, don't count. Worth
+    /// graphing: during an outage it grows by one per call.
+    #[must_use]
+    pub fn policy_answers(&self) -> u64 {
+        self.shared.policy_answers.load(Relaxed)
     }
 }
 
@@ -660,7 +723,7 @@ impl<P: FailurePolicy> RedisStore<P> {
         .await;
         match answer {
             Some(Ok(reply)) => {
-                shared.breaker.succeeded();
+                shared.succeeded();
                 let outcome = reply.outcome();
                 if let (
                     Some((cache, key)),
@@ -680,7 +743,7 @@ impl<P: FailurePolicy> RedisStore<P> {
                     shared.fail::<A>(&call, retry_after, Some(store_error(error)))
                 }
             },
-            None => shared.fail::<A>(&call, shared.breaker.failed(), Some(timed_out())),
+            None => shared.fail::<A>(&call, shared.failed(), Some(timed_out())),
         }
     }
 
@@ -698,7 +761,7 @@ impl<P: FailurePolicy> RedisStore<P> {
         let deleting = delete.query_async::<()>(&mut connection);
         match within(shared.timeout, deleting).await {
             Some(Ok(())) => {
-                shared.breaker.succeeded();
+                shared.succeeded();
                 shared.forget(keys);
                 Ok(())
             }
@@ -707,7 +770,7 @@ impl<P: FailurePolicy> RedisStore<P> {
                 Err(store_error(error))
             }
             None => {
-                shared.breaker.failed();
+                shared.failed();
                 Err(timed_out())
             }
         }
@@ -733,6 +796,7 @@ impl<P: FailurePolicy> RedisStore<P> {
                 .connection
                 .write()
                 .unwrap_or_else(PoisonError::into_inner) = connection;
+            shared.emit(Event::Reconnected);
         }
     }
 }
@@ -788,7 +852,7 @@ impl Shared {
         };
         if permanent {
             // Redis is reachable; the breaker is for outages.
-            self.breaker.succeeded();
+            self.succeeded();
             return Failure::Permanent;
         }
         if matches!(error.kind(), ErrorKind::Server(ServerErrorKind::ReadOnly)) {
@@ -797,7 +861,32 @@ impl Shared {
             // for the breaker to open.
             self.breaker.request_reconnect();
         }
-        Failure::Outage(self.breaker.failed())
+        Failure::Outage(self.failed())
+    }
+
+    /// Records a success with the breaker, reporting a closing.
+    fn succeeded(&self) {
+        if self.breaker.succeeded() {
+            self.emit(Event::BreakerClosed);
+        }
+    }
+
+    /// Records a failure with the breaker, reporting an opening; returns
+    /// when Redis is worth trying again.
+    fn failed(&self) -> Duration {
+        let failed = self.breaker.failed();
+        if failed.opened {
+            self.emit(Event::BreakerOpened {
+                open_for: failed.retry_after,
+            });
+        }
+        failed.retry_after
+    }
+
+    fn emit(&self, event: Event) {
+        if let Some(hook) = &self.on_event {
+            hook(event);
+        }
     }
 
     /// The policy's answer to a failure. `error` is `None` when the breaker
@@ -808,6 +897,7 @@ impl Shared {
         retry_after: Duration,
         error: Option<Error>,
     ) -> Result<Decision, Error> {
+        self.policy_answers.fetch_add(1, Relaxed);
         match &self.on_failure {
             OnFailure::Open => Ok(Decision::allowed_unconfirmed()),
             OnFailure::Closed => Ok(Decision::denied_unavailable(retry_after)),
@@ -877,6 +967,7 @@ impl<P> fmt::Debug for RedisStore<P> {
             .field("timeout", &self.shared.timeout)
             .field("policy", &std::any::type_name::<P>())
             .field("deny_cache", &self.shared.deny_cache.is_some())
+            .field("policy_answers", &self.policy_answers())
             .finish_non_exhaustive()
     }
 }
@@ -889,6 +980,7 @@ impl<P, T: fmt::Debug> fmt::Debug for RedisStoreBuilder<P, T> {
             .field("timeout", &self.timeout)
             .field("circuit_breaker", &self.breaker)
             .field("deny_cache", &self.deny_cache)
+            .field("on_event", &self.on_event.is_some())
             .finish_non_exhaustive()
     }
 }

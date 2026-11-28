@@ -11,6 +11,8 @@ use std::time::Duration;
 #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
 pub use self::redis::breaker::CircuitBreaker;
 #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub use self::redis::event::Event;
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
 pub use self::redis::fallback::FailOver;
 #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
 pub use self::redis::{Direct, NoPolicy, RedisStore, RedisStoreBuilder, ViaSentinel};

@@ -167,17 +167,20 @@ impl Breaker {
         self.reconnect.store(true, Relaxed);
     }
 
-    pub(super) fn succeeded(&self) {
-        if self.failures.load(Relaxed) != 0 || self.open_until.load(Relaxed) != 0 {
-            self.failures.store(0, Relaxed);
-            self.trips.store(0, Relaxed);
-            self.open_until.store(0, Relaxed);
-            self.probe.store(0, Relaxed);
+    /// Records a success; returns whether it closed an open breaker. Only
+    /// one caller sees each closing, since it swaps the open time away.
+    pub(super) fn succeeded(&self) -> bool {
+        if self.failures.load(Relaxed) == 0 && self.open_until.load(Relaxed) == 0 {
+            return false;
         }
+        self.failures.store(0, Relaxed);
+        self.trips.store(0, Relaxed);
+        self.probe.store(0, Relaxed);
+        self.open_until.swap(0, Relaxed) != 0
     }
 
-    /// Records a failure; returns when the store is worth trying again.
-    pub(super) fn failed(&self) -> Duration {
+    /// Records a failure.
+    pub(super) fn failed(&self) -> Failed {
         let CircuitBreaker {
             failures: threshold,
             first_open,
@@ -185,14 +188,14 @@ impl Breaker {
         } = self.settings;
         let failures = self.failures.fetch_add(1, Relaxed).saturating_add(1);
         if failures < threshold.get() {
-            return first_open;
+            return Failed::retry_after(first_open);
         }
         let now = self.now_us();
         let until = self.open_until.load(Relaxed);
         if let Some(left) = until.checked_sub(now).filter(|left| *left > 0) {
             // Already open: calls that were in flight when it opened don't
             // open it again, or one burst would stretch it to the longest.
-            return Duration::from_micros(left);
+            return Failed::retry_after(Duration::from_micros(left));
         }
         let trips = self.trips.load(Relaxed).min(31);
         let open = first_open
@@ -207,10 +210,32 @@ impl Breaker {
                 self.trips.fetch_add(1, Relaxed);
                 self.probe.store(0, Relaxed);
                 self.reconnect.store(true, Relaxed);
-                open
+                Failed {
+                    retry_after: open,
+                    opened: true,
+                }
             }
             // Another failure opened it first.
-            Err(current) => Duration::from_micros(current.saturating_sub(now)),
+            Err(current) => Failed::retry_after(Duration::from_micros(current.saturating_sub(now))),
+        }
+    }
+}
+
+/// What a failure did to the breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Failed {
+    /// When the store is worth trying again.
+    pub(super) retry_after: Duration,
+    /// Whether this failure opened the breaker. Only one caller sees each
+    /// opening, since it takes it with a compare-and-swap.
+    pub(super) opened: bool,
+}
+
+impl Failed {
+    const fn retry_after(retry_after: Duration) -> Self {
+        Self {
+            retry_after,
+            opened: false,
         }
     }
 }
@@ -238,24 +263,39 @@ mod tests {
     #[test]
     fn opens_after_three_failures_and_closes_on_success() {
         let breaker = breaker(CircuitBreaker::new());
-        assert_eq!(breaker.failed(), FIRST);
-        assert_eq!(breaker.failed(), FIRST);
+        assert_eq!(breaker.failed().retry_after, FIRST);
+        assert_eq!(breaker.failed().retry_after, FIRST);
         assert!(breaker.admit().is_ok());
-        assert_eq!(breaker.failed(), FIRST);
+        assert_eq!(breaker.failed().retry_after, FIRST);
         assert!(breaker.admit().is_err());
         assert!(breaker.should_reconnect());
         assert!(!breaker.should_reconnect());
         expire(&breaker);
         assert!(breaker.admit().is_ok(), "the probe");
         assert_eq!(
-            breaker.failed(),
+            breaker.failed().retry_after,
             FIRST * 2,
             "a failed probe reopens for longer"
         );
         breaker.succeeded();
         assert!(breaker.admit().is_ok());
-        assert_eq!(breaker.failed(), FIRST);
+        assert_eq!(breaker.failed().retry_after, FIRST);
         assert!(breaker.admit().is_ok(), "a success resets the count");
+    }
+
+    #[test]
+    fn openings_and_closings_are_reported_once_each() {
+        let breaker = breaker(CircuitBreaker::new());
+        assert!(!breaker.succeeded(), "closed already");
+        assert!(!breaker.failed().opened);
+        assert!(!breaker.succeeded(), "a failure below the threshold");
+        for _ in 0..2 {
+            assert!(!breaker.failed().opened);
+        }
+        assert!(breaker.failed().opened, "the third failure in a row");
+        assert!(!breaker.failed().opened, "already open");
+        assert!(breaker.succeeded());
+        assert!(!breaker.succeeded(), "already closed");
     }
 
     #[test]
@@ -264,7 +304,7 @@ mod tests {
         let open = Duration::from_secs(60);
         let breaker = breaker(CircuitBreaker::new().first_open(open));
         for _ in 0..100 {
-            assert!(breaker.failed() <= open);
+            assert!(breaker.failed().retry_after <= open);
         }
         assert_eq!(breaker.trips.load(Relaxed), 1);
     }
@@ -303,7 +343,7 @@ mod tests {
         let mut longest = Duration::ZERO;
         for _ in 0..40 {
             expire(&breaker);
-            longest = longest.max(breaker.failed());
+            longest = longest.max(breaker.failed().retry_after);
         }
         assert_eq!(longest, Duration::from_secs(5));
     }
@@ -316,14 +356,17 @@ mod tests {
             .longest_open(Duration::from_millis(25));
         let breaker = breaker(settings);
         assert_eq!(
-            breaker.failed(),
+            breaker.failed().retry_after,
             Duration::from_millis(10),
             "one failure opens it"
         );
         assert!(breaker.admit().is_err());
         for expected in [20, 25, 25] {
             expire(&breaker);
-            assert_eq!(breaker.failed(), Duration::from_millis(expected));
+            assert_eq!(
+                breaker.failed().retry_after,
+                Duration::from_millis(expected)
+            );
         }
     }
 
@@ -334,8 +377,8 @@ mod tests {
             .first_open(Duration::from_millis(50))
             .longest_open(Duration::from_millis(1));
         let breaker = breaker(settings);
-        assert_eq!(breaker.failed(), Duration::from_millis(50));
+        assert_eq!(breaker.failed().retry_after, Duration::from_millis(50));
         expire(&breaker);
-        assert_eq!(breaker.failed(), Duration::from_millis(50));
+        assert_eq!(breaker.failed().retry_after, Duration::from_millis(50));
     }
 }

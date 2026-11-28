@@ -26,6 +26,7 @@ use crate::quota::MAX_RATES;
 use crate::{FixedWindow, Quota, Rate, SlidingLog, SlidingWindow, TokenBucket};
 
 mod deny_cache;
+mod events;
 mod fallback;
 mod global;
 mod limiter;
