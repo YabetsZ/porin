@@ -9,7 +9,8 @@
 //!
 //! It assumes the previous window's hits were spread evenly, so it can be
 //! off when they weren't, but it needs only two counters per key. The
-//! weighted part is rounded up, which errs towards denying.
+//! weighted part is rounded up, which errs towards denying when the
+//! assumption holds.
 
 use super::{
     Algorithm, Check, Retry, Spec, Stats, mul_div_ceil, mul_div_floor, saturate, until_end,
@@ -17,15 +18,23 @@ use super::{
 };
 
 /// Sliding window counter: weights the previous window's count by how much
-/// of it still overlaps the last period. Smooths fixed window's edge burst
-/// with two counters per key.
+/// of it still overlaps the last period. Usually smooths fixed window's
+/// edge burst, with two counters per key.
 ///
-/// The weighted part is rounded up, so it never admits more than the
-/// count in any period, but under steady demand it admits one unit fewer
-/// per window than the count: a previous window that was full still
-/// weighs at least 1 until the current window ends. At `3/second` that is
-/// 2 a second. Choose [`SlidingLog`](crate::SlidingLog) for exact counts,
-/// or [`TokenBucket`](crate::TokenBucket) for smooth limits.
+/// It is an estimate, and can miss either way:
+///
+/// - When the previous window's hits bunched at its end, it admits more
+///   than the count in the period ending now: in the worst case nearly
+///   twice, like [`FixedWindow`](crate::FixedWindow). With `10/second`, 10
+///   hits just before a window starts and 9 more 950 ms later make 19 in
+///   under a second. No single window ever holds more than the count.
+///   How close it comes depends on how bursty each key's traffic is.
+/// - Under steady demand it admits one unit fewer per window than the
+///   count: a previous window that was full still weighs at least 1 until
+///   the current window ends. At `3/second` that is 2 a second.
+///
+/// Choose [`SlidingLog`](crate::SlidingLog) for exact counts, or
+/// [`TokenBucket`](crate::TokenBucket) for a hard cap on any interval.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SlidingWindow;
 
@@ -277,5 +286,26 @@ mod tests {
                 retry: Retry::After(Duration::from_millis(100)),
             }
         );
+    }
+
+    #[test]
+    fn hits_bunched_before_a_window_starts_can_nearly_double_the_period() {
+        // 10 hits just before 1 s, then at 1.95 s they weigh ⌈10 × 0.05⌉ = 1,
+        // so 9 more fit: 19 within one second. Pinned, so the docs that
+        // promise only "nearly twice" stay true.
+        let rate = per_second(10);
+        let state = SlidingWindowState {
+            start: 1_000_000_000,
+            previous: 10,
+            current: 0,
+        };
+        assert!(matches!(
+            SlidingWindow::check(rate, &state, at(1_950), 9),
+            Check::Allowed { .. }
+        ));
+        assert!(matches!(
+            SlidingWindow::check(rate, &state, at(1_950), 10),
+            Check::Denied { .. }
+        ));
     }
 }
