@@ -47,6 +47,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// growing from 100 ms to 5 s, and answers by `P` at once; see
 /// [`CircuitBreaker`].
 ///
+/// A hit that timed out may still reach a slow Redis and be recorded after
+/// its caller got the policy's answer. It then spends units the caller may
+/// have been refused, which under-admits but never over-admits.
+///
 /// Cloning is cheap; clones share the connection.
 ///
 /// # Cost

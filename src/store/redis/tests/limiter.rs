@@ -1122,3 +1122,528 @@ async fn unreadable_sliding_window_state_is_an_error() {
 async fn unreadable_sliding_log_state_is_an_error() {
     unreadable_state_is_an_error::<SlidingLog>().await;
 }
+
+/// Sends `signal` (`STOP` or `CONT`) to the server this test started.
+fn signal(server: &Server, signal: &str) {
+    let pid = server
+        .child
+        .as_ref()
+        .expect("a server this test started")
+        .id();
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("kill runs");
+    assert!(status.success(), "SIG{signal} reached redis-server");
+}
+
+const HUNG_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Three hits on a frozen Redis, each answered by the policy once the
+/// timeout fires, then a fourth answered at once by the open breaker.
+async fn answers_a_hung_redis<P: FailurePolicy>(
+    limiter: &Limiter<u64, crate::TokenBucket, RedisStore<P>>,
+    by_policy: fn(&Result<Decision, Error>) -> bool,
+) {
+    // Generous: this only has to tell a timeout from a hang.
+    let slack = Duration::from_millis(500);
+    for failure in 1..=3 {
+        let start = Instant::now();
+        let answer = limiter.hit(&1).await;
+        let took = start.elapsed();
+        assert!(by_policy(&answer), "failure {failure}: {answer:?}");
+        assert!(
+            took >= HUNG_TIMEOUT && took < HUNG_TIMEOUT + slack,
+            "failure {failure} took {took:?}"
+        );
+    }
+    let start = Instant::now();
+    let answer = limiter.hit(&1).await;
+    assert!(by_policy(&answer), "the open breaker: {answer:?}");
+    assert!(
+        start.elapsed() < Duration::from_millis(50),
+        "the open breaker answered in {:?}",
+        start.elapsed()
+    );
+}
+
+/// A Redis that hangs rather than dies: connections stay open and nothing
+/// answers. Each policy answers once the timeout fires, the breaker then
+/// answers at once, and the store recovers when Redis does. The hits that
+/// timed out are still in Redis's input and run when it resumes, so they
+/// are recorded although their callers got the policy's answer; that only
+/// takes units nobody got.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn a_hung_redis_is_answered_by_the_policy_after_the_timeout() {
+    async fn timed<P: FailurePolicy>(server: &Server, policy: P) -> RedisStore<P> {
+        RedisStore::builder(server.url.as_str())
+            .on_failure(policy)
+            .timeout(HUNG_TIMEOUT)
+            // Open for a second rather than 100 ms, so the checks that it
+            // answers at once can't race its reopening.
+            .circuit_breaker(CircuitBreaker::new().first_open(Duration::from_secs(1)))
+            .connect()
+            .await
+            .expect("connects")
+    }
+    let Some(server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let quota = quota!("3/hour");
+    let open: Limiter<u64, _, _> = Limiter::redis_builder(&timed(&server, FailOpen).await, "o")
+        .quota(quota)
+        .build()
+        .unwrap();
+    let closed: Limiter<u64, _, _> = Limiter::redis_builder(&timed(&server, FailClosed).await, "c")
+        .quota(quota)
+        .build()
+        .unwrap();
+    let propagate: Limiter<u64, _, _> =
+        Limiter::redis_builder(&timed(&server, Propagate).await, "p")
+            .quota(quota)
+            .build()
+            .unwrap();
+    for limiter_hit in [
+        open.hit(&0).await,
+        closed.hit(&0).await,
+        propagate.hit(&0).await,
+    ] {
+        assert!(limiter_hit.unwrap().stats().is_known());
+    }
+
+    signal(&server, "STOP");
+    answers_a_hung_redis(&open, |answer| {
+        matches!(answer, Ok(decision) if decision.is_allowed() && !decision.stats().is_known())
+    })
+    .await;
+    answers_a_hung_redis(
+        &closed,
+        |answer| matches!(answer, Ok(Decision::Denied(denial)) if denial.is_store_unavailable()),
+    )
+    .await;
+    answers_a_hung_redis(&propagate, |answer| matches!(answer, Err(Error::Store(_)))).await;
+    signal(&server, "CONT");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !open.hit(&2).await.unwrap().stats().is_known() {
+        assert!(Instant::now() < deadline, "the store came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    while !closed.hit(&2).await.unwrap().stats().is_known() {
+        assert!(Instant::now() < deadline, "the store came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    while propagate.hit(&2).await.is_err() {
+        assert!(Instant::now() < deadline, "the store came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Each limiter sent key 1 three hits that timed out (the fourth never
+    // left: the breaker answered it). All three ran once Redis resumed,
+    // spending the whole quota. Under fail closed and propagate their
+    // callers got no unit, so the key admits nothing this hour: the late
+    // hits under-admit. Under fail open their callers were allowed, and
+    // the units are spent as if Redis had answered.
+    for (name, stats) in [
+        ("fail open", open.stats(&1).await.unwrap()),
+        ("fail closed", closed.stats(&1).await.unwrap()),
+        ("propagate", propagate.stats(&1).await.unwrap()),
+    ] {
+        assert!(stats.is_known(), "{name}");
+        assert_eq!(stats.remaining(), 0, "{name}: the late hits were recorded");
+    }
+    let Decision::Denied(denial) = closed.hit(&1).await.unwrap() else {
+        panic!("the late hits spent the quota");
+    };
+    assert!(!denial.is_store_unavailable());
+}
+
+/// Reads and waits during an outage answer by the policy too, at once.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn reads_and_waits_answer_by_policy_during_an_outage() {
+    let Some(mut server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let quota = quota!("1/hour");
+    let open: Limiter<u64, _, _> = Limiter::redis_builder(&store(&server, FailOpen).await, "o")
+        .quota(quota)
+        .build()
+        .unwrap();
+    let closed: Limiter<u64, _, _> = Limiter::redis_builder(&store(&server, FailClosed).await, "c")
+        .quota(quota)
+        .build()
+        .unwrap();
+    let propagate: Limiter<u64, _, _> =
+        Limiter::redis_builder(&store(&server, Propagate).await, "p")
+            .quota(quota)
+            .build()
+            .unwrap();
+    server.stop();
+    // Enough rounds to answer both after Redis refused the connection and
+    // from the open breaker.
+    for round in 0..5 {
+        assert!(!open.stats(&1).await.unwrap().is_known(), "round {round}");
+        let tested = open.test_n(&1, 1).await.unwrap();
+        assert!(tested.is_allowed() && !tested.stats().is_known());
+        let ready = open.until_ready(&1).await.unwrap();
+        assert!(ready.is_allowed() && !ready.stats().is_known());
+
+        assert!(!closed.stats(&1).await.unwrap().is_known(), "round {round}");
+        let Decision::Denied(denial) = closed.test_n(&1, 1).await.unwrap() else {
+            panic!("fail closed denies a test");
+        };
+        assert!(denial.is_store_unavailable());
+        // Fail closed waits for Redis, which isn't coming back.
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(150), closed.until_ready(&1)).await;
+        assert!(waiting.is_err(), "round {round}: still waiting");
+
+        assert!(matches!(propagate.stats(&1).await, Err(Error::Store(_))));
+        assert!(matches!(
+            propagate.test_n(&1, 1).await,
+            Err(Error::Store(_))
+        ));
+        assert!(matches!(
+            propagate.until_ready(&1).await,
+            Err(Error::Store(_))
+        ));
+    }
+}
+
+/// Calls of porin's scripts Redis has seen since its stats were reset,
+/// including those it refused.
+fn script_calls(connection: &mut ::redis::Connection) -> u64 {
+    let info: String = ::redis::cmd("INFO")
+        .arg("commandstats")
+        .query(connection)
+        .unwrap();
+    info.lines()
+        .filter(|line| line.starts_with("cmdstat_evalsha:") || line.starts_with("cmdstat_eval:"))
+        .flat_map(|line| line.split([':', ',']))
+        .filter_map(|field| {
+            let (name, value) = field.split_once('=')?;
+            ["calls", "rejected_calls"]
+                .contains(&name)
+                .then(|| value.parse::<u64>().unwrap())
+        })
+        .sum()
+}
+
+/// While the breaker is open, `until_ready` under fail closed sleeps until
+/// Redis is worth trying again instead of spinning. Over a second Redis
+/// sees a handful of calls (3 to open the breaker, then a probe and a
+/// reconnect check at 100, 200 and 400 ms intervals) and the wait is woken
+/// about as often.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn until_ready_sleeps_while_redis_is_unavailable() {
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let Some(server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let closed: Limiter<u64, _, _> =
+        Limiter::redis_builder(&store(&server, FailClosed).await, "sleeps")
+            .quota(quota!("1/hour"))
+            .build()
+            .unwrap();
+    // A Redis out of memory answers every script with an error at once, so
+    // each call that reaches it is counted.
+    let mut admin = sync_connection(&server.url);
+    ::redis::cmd("CONFIG")
+        .arg(&["SET", "maxmemory-policy", "noeviction"])
+        .exec(&mut admin)
+        .unwrap();
+    ::redis::cmd("CONFIG")
+        .arg(&["SET", "maxmemory", "1"])
+        .exec(&mut admin)
+        .unwrap();
+    ::redis::cmd("CONFIG")
+        .arg("RESETSTAT")
+        .exec(&mut admin)
+        .unwrap();
+
+    let mut waiting = pin!(closed.until_ready(&1));
+    let mut deadline = pin!(tokio::time::sleep(Duration::from_secs(1)));
+    let mut polls = 0_u32;
+    let answer = std::future::poll_fn(|cx| {
+        polls += 1;
+        if let Poll::Ready(answer) = waiting.as_mut().poll(cx) {
+            return Poll::Ready(Some(answer));
+        }
+        deadline.as_mut().poll(cx).map(|()| None)
+    })
+    .await;
+    assert!(answer.is_none(), "still waiting: {answer:?}");
+    let calls = script_calls(&mut admin);
+    assert!((3..=20).contains(&calls), "{calls} script calls in 1 s");
+    assert!(polls <= 40, "woken {polls} times in 1 s");
+}
+
+/// A cost no rate's burst can hold is denied for good, with no retry time,
+/// even where another rate would allow it, and `until_ready_n` returns the
+/// denial at once. Nothing is recorded.
+async fn costs_past_the_burst_are_never_allowed<A: crate::Algorithm + Default>() {
+    let Some(server) = server() else { return };
+    let redis = store(&server, Propagate).await;
+    let id = format!("never:{:?}", A::default());
+    let one: Limiter<u64, A, _> = Limiter::redis_builder(&redis, &id)
+        .algorithm(A::default())
+        .quota(quota!("5/second"))
+        .build()
+        .unwrap();
+    // 10 fits 100/hour but never 5/second.
+    let two: Limiter<u64, A, _> = Limiter::redis_builder(&redis, &id)
+        .algorithm(A::default())
+        .quota(quota!("5/second; 100/hour"))
+        .build()
+        .unwrap();
+    let never = |decision: Decision| {
+        matches!(decision, Decision::Denied(denial)
+            if denial.retry_after().is_none() && !denial.is_store_unavailable())
+    };
+    assert!(never(one.hit_n(&1, 6).await.unwrap()), "{id}");
+    assert!(never(one.test_n(&1, 6).await.unwrap()), "{id}");
+    assert!(never(two.hit_n(&1, 10).await.unwrap()), "{id}");
+    let start = Instant::now();
+    assert!(never(one.until_ready_n(&1, 6).await.unwrap()), "{id}");
+    assert!(never(two.until_ready_n(&1, 10).await.unwrap()), "{id}");
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "{id}: returned at once, not after {:?}",
+        start.elapsed()
+    );
+    let mut connection = sync_connection(&server.url);
+    let written: Vec<String> = limiter_keys(&mut connection)
+        .into_iter()
+        .filter(|key| key.contains(&super::super::prefix(&id)))
+        .collect();
+    assert!(written.is_empty(), "{id}: nothing recorded: {written:?}");
+    assert_eq!(two.stats(&1).await.unwrap().remaining(), 5, "{id}");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn token_bucket_costs_past_the_burst_are_never_allowed() {
+    costs_past_the_burst_are_never_allowed::<crate::TokenBucket>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn fixed_window_costs_past_the_limit_are_never_allowed() {
+    costs_past_the_burst_are_never_allowed::<FixedWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn sliding_window_costs_past_the_limit_are_never_allowed() {
+    costs_past_the_burst_are_never_allowed::<SlidingWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn sliding_log_costs_past_the_limit_are_never_allowed() {
+    costs_past_the_burst_are_never_allowed::<SlidingLog>().await;
+}
+
+/// The commands Redis has run since its stats were reset that change
+/// data: everything outside the reads porin's scripts and these tests make.
+fn writes(connection: &mut ::redis::Connection) -> Vec<String> {
+    const READS: [&str; 12] = [
+        "evalsha",
+        "eval",
+        "time",
+        "get",
+        "zrange",
+        "zrevrangebyscore",
+        "zcard",
+        "zcount",
+        "keys",
+        "info",
+        "config|resetstat",
+        "pexpiretime",
+    ];
+    let info: String = ::redis::cmd("INFO")
+        .arg("commandstats")
+        .query(connection)
+        .unwrap();
+    info.lines()
+        .filter_map(|line| line.strip_prefix("cmdstat_")?.split_once(':'))
+        .map(|(name, _)| name.to_owned())
+        .filter(|name| !READS.contains(&name.as_str()))
+        .collect()
+}
+
+/// A cost of 0 writes nothing, not even a key, is allowed even when the
+/// key is spent, and reports what `stats` reports.
+async fn cost_zero_writes_nothing<A: crate::Algorithm + Default>() {
+    let Some(server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let redis = store(&server, Propagate).await;
+    let limiter: Limiter<u64, A, _> = Limiter::redis_builder(&redis, "zero")
+        .algorithm(A::default())
+        .quota(quota!("3/hour; 5/day"))
+        .build()
+        .unwrap();
+    let name = format!("{:?}", A::default());
+    let mut admin = sync_connection(&server.url);
+    ::redis::cmd("CONFIG")
+        .arg("RESETSTAT")
+        .exec(&mut admin)
+        .unwrap();
+    let fresh = limiter.hit_n(&1, 0).await.unwrap();
+    assert!(fresh.is_allowed() && fresh.stats().is_known(), "{name}");
+    assert_eq!(fresh.stats().remaining(), 3, "{name}");
+    assert!(limiter.test_n(&1, 0).await.unwrap().is_allowed(), "{name}");
+    assert_eq!(limiter_keys(&mut admin), Vec::<String>::new(), "{name}");
+    assert_eq!(writes(&mut admin), Vec::<String>::new(), "{name}");
+
+    assert!(limiter.hit_n(&1, 3).await.unwrap().is_allowed(), "{name}");
+    assert!(!limiter.hit(&1).await.unwrap().is_allowed(), "{name}");
+    ::redis::cmd("CONFIG")
+        .arg("RESETSTAT")
+        .exec(&mut admin)
+        .unwrap();
+    let spent = limiter.hit_n(&1, 0).await.unwrap();
+    let stats = limiter.stats(&1).await.unwrap();
+    assert!(spent.is_allowed(), "{name}: allowed with nothing left");
+    assert!(limiter.test_n(&1, 0).await.unwrap().is_allowed(), "{name}");
+    assert_eq!(spent.stats().remaining(), 0, "{name}");
+    assert_eq!(spent.stats().remaining(), stats.remaining(), "{name}");
+    // Redis's clock moved on between the two calls.
+    let drift = spent
+        .stats()
+        .reset_after()
+        .checked_sub(stats.reset_after())
+        .expect("the later call resets no later");
+    assert!(drift < Duration::from_millis(100), "{name}: {drift:?}");
+    assert_eq!(writes(&mut admin), Vec::<String>::new(), "{name}");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn token_bucket_cost_zero_writes_nothing() {
+    cost_zero_writes_nothing::<crate::TokenBucket>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn fixed_window_cost_zero_writes_nothing() {
+    cost_zero_writes_nothing::<FixedWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn sliding_window_cost_zero_writes_nothing() {
+    cost_zero_writes_nothing::<SlidingWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn sliding_log_cost_zero_writes_nothing() {
+    cost_zero_writes_nothing::<SlidingLog>().await;
+}
+
+/// Clients racing on one key of a quota with several rates get exactly
+/// what its tightest rate allows, on every algorithm.
+async fn racing_clients_admit_exactly_the_tightest_rate<A: crate::Algorithm + Default>() {
+    let Some(server) = server() else { return };
+    let id = format!("race:{:?}", A::default());
+    let mut tasks = Vec::new();
+    for client in 0..4 {
+        // A store per client: separate connections, as separate instances.
+        let redis = store(&server, Propagate).await;
+        // 70 a day is the tightest; the hourly rate also holds 70 or more.
+        let limiter: Limiter<u64, A, _> = Limiter::redis_builder(&redis, &id)
+            .algorithm(A::default())
+            .quota(quota!("100/hour; 70/day"))
+            .build()
+            .unwrap();
+        for _ in 0..10 {
+            let limiter = limiter.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut allowed = 0_u32;
+                for _ in 0..10 + client {
+                    if limiter.hit(&1).await.unwrap().is_allowed() {
+                        allowed += 1;
+                    }
+                }
+                allowed
+            }));
+        }
+    }
+    let mut allowed = 0;
+    for task in tasks {
+        allowed += task.await.unwrap();
+    }
+    assert_eq!(allowed, 70, "{id}: 460 hits racing for 70 units");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn racing_token_buckets_admit_exactly_the_tightest_rate() {
+    racing_clients_admit_exactly_the_tightest_rate::<crate::TokenBucket>().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn racing_fixed_windows_admit_exactly_the_tightest_rate() {
+    racing_clients_admit_exactly_the_tightest_rate::<FixedWindow>().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn racing_sliding_windows_admit_exactly_the_tightest_rate() {
+    racing_clients_admit_exactly_the_tightest_rate::<SlidingWindow>().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn racing_sliding_logs_admit_exactly_the_tightest_rate() {
+    racing_clients_admit_exactly_the_tightest_rate::<SlidingLog>().await;
+}
+
+/// A `10 per 100 ms` key, timed by Redis's own clock, expires once it is
+/// full again and is gone from Redis then.
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn millisecond_quota_keys_expire_on_time() {
+    let Some(server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let redis = store(&server, Propagate).await;
+    let rate = Rate::new(
+        std::num::NonZeroU32::new(10).unwrap(),
+        Duration::from_millis(100),
+    )
+    .unwrap();
+    let limiter: Limiter<u64, _, _> = Limiter::redis_builder(&redis, "ms")
+        .quota(crate::Quota::new(rate))
+        .build()
+        .unwrap();
+    let before = Instant::now();
+    assert!(limiter.hit_n(&1, 10).await.unwrap().is_allowed());
+    let mut admin = sync_connection(&server.url);
+    let names = limiter_keys(&mut admin);
+    let [name] = names.as_slice() else {
+        panic!("one key: {names:?}");
+    };
+    let ttl: i64 = ::redis::cmd("PTTL").arg(name).query(&mut admin).unwrap();
+    let elapsed = i64::try_from(before.elapsed().as_millis()).unwrap();
+    // Full again 100 ms after the hit; the expiry rounds up to a whole
+    // millisecond.
+    assert!(
+        ttl <= 101 && ttl >= 100 - elapsed - 1,
+        "{ttl} ms to live, {elapsed} ms after the hit"
+    );
+    tokio::time::sleep(Duration::from_millis(u64::try_from(ttl).unwrap() + 5)).await;
+    let exists: bool = ::redis::cmd("EXISTS").arg(name).query(&mut admin).unwrap();
+    assert!(!exists, "{name} expired");
+    let refilled = limiter.hit_n(&1, 10).await.unwrap();
+    assert!(refilled.is_allowed(), "the full burst is back");
+}

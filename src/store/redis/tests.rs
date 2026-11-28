@@ -21,7 +21,7 @@ use proptest::test_runner::{Config, TestCaseError, TestRunner};
 
 use super::run_script;
 use super::scripts::Scripted;
-use crate::algorithm::{Outcome, Spec, Unit, check_quota_in};
+use crate::algorithm::{Outcome, Retry, Spec, Stats, Unit, check_quota_in};
 use crate::quota::MAX_RATES;
 use crate::{FixedWindow, Quota, Rate, SlidingLog, SlidingWindow, TokenBucket};
 
@@ -846,4 +846,505 @@ fn memory_and_redis_sliding_windows_agree() {
 #[cfg_attr(miri, ignore = "needs a Redis server")]
 fn memory_and_redis_sliding_logs_agree() {
     memory_and_redis_agree::<SlidingLog>(false);
+}
+
+/// Stats as a one-rate script reports them: that rate is the limiting one.
+fn one_rate_stats(remaining: u32, reset_us: u64) -> Stats {
+    Stats {
+        remaining,
+        reset_after: Duration::from_micros(reset_us),
+        limiting: 0,
+        limiting_reset: Duration::from_micros(reset_us),
+    }
+}
+
+fn allowed(remaining: u32, reset_us: u64) -> Outcome {
+    Outcome::Allowed(one_rate_stats(remaining, reset_us))
+}
+
+fn denied(remaining: u32, reset_us: u64, retry: Retry) -> Outcome {
+    Outcome::Denied {
+        stats: one_rate_stats(remaining, reset_us),
+        retry,
+    }
+}
+
+fn retry_us(micros: u64) -> Retry {
+    Retry::After(Duration::from_micros(micros))
+}
+
+/// Runs `A`'s script on `keys` at `now`, which replaces Redis `TIME`.
+fn script_at<A: Scripted>(
+    runtime: &tokio::runtime::Runtime,
+    connection: &mut ::redis::aio::MultiplexedConnection,
+    quota: &Quota,
+    keys: &[String],
+    (record, cost, now): (bool, u32, u64),
+) -> Outcome {
+    runtime
+        .block_on(run_script::<A, _>(
+            connection,
+            quota,
+            keys,
+            record,
+            cost,
+            Some(now),
+        ))
+        .unwrap()
+        .outcome()
+}
+
+fn expire_time_ms(
+    runtime: &tokio::runtime::Runtime,
+    connection: &mut ::redis::aio::MultiplexedConnection,
+    key: &str,
+) -> i64 {
+    runtime
+        .block_on(::redis::cmd("PEXPIRETIME").arg(key).query_async(connection))
+        .unwrap()
+}
+
+/// The GCRA golden table for a token bucket of 1 per second with a burst
+/// of 5, every value derived by hand from porin's rules: the emission
+/// interval is 1 s, a full bucket is 5 intervals, a hit moves the TAT
+/// `cost` intervals past `max(TAT, now)`, `remaining` is
+/// `floor((now + 5 s - TAT) / 1 s)` and `reset` is `TAT - now`.
+///
+/// redis-cell's `CL.THROTTLE key 4 1 1` meters the same bucket: its
+/// `max_burst` counts the tokens past the first, so its 4 is porin's burst
+/// of 5. It reports times in whole seconds and a `retry_after` of -1 for an
+/// allowed hit; porin reports microseconds and no retry time for one.
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn token_bucket_script_matches_the_gcra_golden_table() {
+    const SECOND: u64 = 1_000_000;
+    let Some(server) = server() else { return };
+    let runtime = runtime();
+    let client = ::redis::Client::open(server.url.as_str()).unwrap();
+    let mut connection = runtime
+        .block_on(client.get_multiplexed_async_connection())
+        .unwrap();
+    let quota = Quota::new(rate(1, 1_000, 5));
+    let keys = vec!["test:{golden}:0".to_owned()];
+    let start = start_us();
+    // (time after the start in us, cost, answer)
+    let rows = [
+        // More than the burst can ever hold.
+        (0, 6, denied(5, 0, Retry::Never)),
+        (0, 1, allowed(4, SECOND)),
+        (0, 1, allowed(3, 2 * SECOND)),
+        (0, 1, allowed(2, 3 * SECOND)),
+        (0, 1, allowed(1, 4 * SECOND)),
+        (0, 1, allowed(0, 5 * SECOND)),
+        // TAT 5 s: the next token is free at 6 s - 5 s.
+        (0, 1, denied(0, 5 * SECOND, retry_us(SECOND))),
+        // TAT 5 s -> 6 s.
+        (3 * SECOND, 1, allowed(2, 3 * SECOND)),
+        // TAT 6 s -> 7 s: 1.1 tokens spare, rounded down.
+        (3_100_000, 1, allowed(1, 3_900_000)),
+        // TAT 7 s -> 8 s.
+        (4 * SECOND, 1, allowed(1, 4 * SECOND)),
+        // TAT 8 s -> 9 s.
+        (8 * SECOND, 1, allowed(4, SECOND)),
+        // The reference table lists remaining 4 and reset 1 s for this row,
+        // then remaining 2, reset 3 s and retry 3 s for the next two: one
+        // token fewer than porin, as if one were still spent. The 8 s hit
+        // left the TAT at 9 s, so by TAT arithmetic the bucket is full at
+        // 9.5 s, and porin reports all 5 with nothing to reset.
+        (9_500_000, 0, allowed(5, 0)),
+        // TAT max(9 s, 9.5 s) -> 11.5 s.
+        (9_500_000, 2, allowed(3, 2 * SECOND)),
+        // A TAT of 16.5 s would need now >= 11.5 s.
+        (9_500_000, 5, denied(3, 2 * SECOND, retry_us(2 * SECOND))),
+    ];
+    for (at, cost, expected) in rows {
+        let outcome = script_at::<TokenBucket>(
+            &runtime,
+            &mut connection,
+            &quota,
+            &keys,
+            (true, cost, start + at),
+        );
+        assert_eq!(outcome, expected, "cost {cost} at {at} us");
+    }
+}
+
+/// One key of a `10 per 100 ms` quota, run at fake times so nothing
+/// depends on the test's speed. Its fixed window starts at `window`, and
+/// every first hit lands 30 ms in, at `first`.
+struct MillisecondKey {
+    _server: Server,
+    runtime: tokio::runtime::Runtime,
+    connection: ::redis::aio::MultiplexedConnection,
+    quota: Quota,
+    key: Vec<String>,
+    window: u64,
+    first: u64,
+}
+
+const MS_PERIOD: u64 = 100_000;
+
+impl MillisecondKey {
+    fn new(name: &str) -> Option<Self> {
+        let server = server()?;
+        let runtime = runtime();
+        let client = ::redis::Client::open(server.url.as_str()).unwrap();
+        let connection = runtime
+            .block_on(client.get_multiplexed_async_connection())
+            .unwrap();
+        let rate = Rate::new(NonZeroU32::new(10).unwrap(), Duration::from_millis(100)).unwrap();
+        let window = start_us() / MS_PERIOD * MS_PERIOD;
+        Some(Self {
+            _server: server,
+            runtime,
+            connection,
+            quota: Quota::new(rate),
+            key: vec![format!("test:{{ms}}:{name}")],
+            window,
+            first: window + 30_000,
+        })
+    }
+
+    /// A hit of 1 at `now`.
+    fn hit<A: Scripted>(&mut self, now: u64) -> Outcome {
+        script_at::<A>(
+            &self.runtime,
+            &mut self.connection,
+            &self.quota,
+            &self.key,
+            (true, 1, now),
+        )
+    }
+
+    /// When Redis expires the key, in microseconds.
+    fn expires_us(&mut self) -> u64 {
+        let ms = expire_time_ms(&self.runtime, &mut self.connection, &self.key[0]);
+        u64::try_from(ms).expect("the key expires") * 1_000
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn millisecond_token_buckets_refill_and_expire_on_time() {
+    let Some(mut key) = MillisecondKey::new("token_bucket") else {
+        return;
+    };
+    let first = key.first;
+    // One token every 10 ms.
+    for spent in 1..=10 {
+        let reset = u64::from(spent) * 10_000;
+        assert_eq!(key.hit::<TokenBucket>(first), allowed(10 - spent, reset));
+    }
+    assert_eq!(key.expires_us(), first + MS_PERIOD, "full 100 ms later");
+    assert_eq!(
+        key.hit::<TokenBucket>(first),
+        denied(0, MS_PERIOD, retry_us(10_000))
+    );
+    assert_eq!(
+        key.hit::<TokenBucket>(first + 9_999),
+        denied(0, MS_PERIOD - 9_999, retry_us(1))
+    );
+    assert_eq!(
+        key.hit::<TokenBucket>(first + 10_000),
+        allowed(0, MS_PERIOD),
+        "one token back after 10 ms"
+    );
+    assert_eq!(key.expires_us(), first + 110_000);
+    let full = script_at::<TokenBucket>(
+        &key.runtime,
+        &mut key.connection,
+        &key.quota,
+        &key.key,
+        (false, 0, first + 110_000),
+    );
+    assert_eq!(full, allowed(10, 0), "full at its expiry time");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn millisecond_fixed_windows_refill_and_expire_on_time() {
+    let Some(mut key) = MillisecondKey::new("fixed_window") else {
+        return;
+    };
+    let (window, first) = (key.window, key.first);
+    // The window ends 70 ms after the first hit.
+    for spent in 1..=10 {
+        assert_eq!(key.hit::<FixedWindow>(first), allowed(10 - spent, 70_000));
+    }
+    assert_eq!(key.expires_us(), window + MS_PERIOD);
+    assert_eq!(
+        key.hit::<FixedWindow>(window + MS_PERIOD - 1),
+        denied(0, 1, retry_us(1))
+    );
+    assert_eq!(
+        key.hit::<FixedWindow>(window + MS_PERIOD),
+        allowed(9, MS_PERIOD),
+        "the next window starts empty"
+    );
+    assert_eq!(key.expires_us(), window + 2 * MS_PERIOD);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn millisecond_sliding_logs_refill_and_expire_on_time() {
+    let Some(mut key) = MillisecondKey::new("sliding_log") else {
+        return;
+    };
+    let first = key.first;
+    // Each hit expires 100 ms after it was made.
+    for spent in 1..=10 {
+        assert_eq!(key.hit::<SlidingLog>(first), allowed(10 - spent, MS_PERIOD));
+    }
+    assert_eq!(key.expires_us(), first + MS_PERIOD);
+    assert_eq!(
+        key.hit::<SlidingLog>(first + MS_PERIOD - 1),
+        denied(0, 1, retry_us(1))
+    );
+    assert_eq!(
+        key.hit::<SlidingLog>(first + MS_PERIOD),
+        allowed(9, MS_PERIOD),
+        "all ten hits have expired"
+    );
+    assert_eq!(key.expires_us(), first + 2 * MS_PERIOD);
+}
+
+/// A hit of cost 0 records nothing, so it must answer exactly as the
+/// check `stats` makes, at the same time, on every algorithm.
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn cost_zero_hits_answer_exactly_like_stats() {
+    fn check<A: Scripted>(
+        runtime: &tokio::runtime::Runtime,
+        connection: &mut ::redis::aio::MultiplexedConnection,
+    ) {
+        let quota = Quota::new(rate(3, 1_000, 3))
+            .with(rate(5, 60_000, 5))
+            .unwrap();
+        let keys = vec![
+            format!("test:{{zero:{}}}:0", A::NAME),
+            format!("test:{{zero:{}}}:1", A::NAME),
+        ];
+        let start = start_us();
+        // Fresh, part spent, exhausted, refilling and idle again.
+        for (step, cost) in [(0, 0), (0, 2), (1, 1), (400_000, 0), (1_700_000, 1)] {
+            let now = start + step;
+            if cost > 0 {
+                script_at::<A>(runtime, connection, &quota, &keys, (true, cost, now));
+            }
+            let hit = script_at::<A>(runtime, connection, &quota, &keys, (true, 0, now));
+            let stats = script_at::<A>(runtime, connection, &quota, &keys, (false, 0, now));
+            assert!(matches!(hit, Outcome::Allowed(_)), "{} at {step}", A::NAME);
+            assert_eq!(hit, stats, "{} at {step}", A::NAME);
+        }
+    }
+
+    let Some(server) = server() else { return };
+    let runtime = runtime();
+    let client = ::redis::Client::open(server.url.as_str()).unwrap();
+    let mut connection = runtime
+        .block_on(client.get_multiplexed_async_connection())
+        .unwrap();
+    check::<TokenBucket>(&runtime, &mut connection);
+    check::<FixedWindow>(&runtime, &mut connection);
+    check::<SlidingWindow>(&runtime, &mut connection);
+    check::<SlidingLog>(&runtime, &mut connection);
+}
+
+/// Rates past 1,000,000 a second refill a token in under a microsecond.
+/// Redis rounds that interval up to 1 us, so it admits at most one unit a
+/// microsecond plus the burst, where the nanosecond memory store admits
+/// more: 10,000,000 a second with a burst of 10 refills 10 units a
+/// microsecond in memory and 1 in Redis.
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn rates_past_a_million_a_second_refill_one_unit_a_microsecond() {
+    use crate::{Limiter, ManualClock, Timestamp};
+
+    let Some(server) = server() else { return };
+    let runtime = runtime();
+    let client = ::redis::Client::open(server.url.as_str()).unwrap();
+    let mut connection = runtime
+        .block_on(client.get_multiplexed_async_connection())
+        .unwrap();
+    let quota = Quota::new(rate(10_000_000, 1_000, 10));
+    let keys = vec!["test:{fast}:0".to_owned()];
+    let clock = ManualClock::new();
+    let memory: Limiter<u8> = Limiter::builder().quota(quota).clock(clock.clone()).build();
+    let start = start_us();
+    let mut hit = |at: u64| {
+        clock.set(Timestamp::from_nanos((start + at) * 1_000));
+        let local = runtime.block_on(memory.hit_n(&0, 10)).unwrap();
+        let redis = script_at::<TokenBucket>(
+            &runtime,
+            &mut connection,
+            &quota,
+            &keys,
+            (true, 10, start + at),
+        );
+        (local.is_allowed(), redis)
+    };
+    // Both start with a full burst.
+    assert_eq!(hit(0), (true, allowed(0, 10)));
+    // Memory's TAT is 1,000 ns, so 1 us later it is full again. Redis's is
+    // 10 us; 10 more units need it 10 us in the past.
+    assert_eq!(hit(1), (true, denied(1, 9, retry_us(9))));
+    assert_eq!(hit(9), (true, denied(9, 1, retry_us(1))));
+    assert_eq!(hit(10), (true, allowed(0, 10)));
+}
+
+/// Quotas where rounding to microseconds changes the arithmetic: rates
+/// past 1,000,000 a second, whose interval is below 1 us, and intervals
+/// that aren't whole microseconds.
+fn rounding_quota(token_bucket: bool) -> impl Strategy<Value = Quota> {
+    let fast = (
+        prop_oneof![
+            1_000_001..=10_000_000_u32,
+            Just(u32::MAX),
+            1_000_001..=u32::MAX
+        ],
+        prop::sample::select(&[1_u64, 7, 1_000][..]),
+        1..=12_u32,
+    );
+    let uneven = (
+        prop::sample::select(&[3_u32, 6, 7, 9, 11, 13, 999_999, 1_000_001][..]),
+        prop::sample::select(&[1_u64, 7, 1_000, 60_000][..]),
+        1..=8_u32,
+    );
+    let one = prop_oneof![fast, uneven];
+    prop::collection::vec(one, 1..=MAX_RATES).prop_map(move |rates| {
+        let make = |&(count, period_ms, burst): &(u32, u64, u32)| {
+            rate(count, period_ms, if token_bucket { burst } else { count })
+        };
+        let mut quota = Quota::new(make(&rates[0]));
+        for spec in &rates[1..] {
+            if let Ok(with) = quota.with(make(spec)) {
+                quota = with;
+            }
+        }
+        quota
+    })
+}
+
+/// Like [`ops`], but mostly a few microseconds apart, where a rate past
+/// 1,000,000 a second runs dry in Redis and not in memory.
+///
+/// Time never steps back here. A step back of `d` leaves both stores
+/// `d / interval` tokens further behind, which is more tokens for memory's
+/// finer interval: at 1,000,001 a millisecond with a burst of 11, a hit and
+/// then a check 1 us earlier is denied in memory (1,000 tokens behind) and
+/// allowed in Redis (1 token behind). Neither admits more than the burst
+/// that way, so that is how each handles a clock going back, not rounding.
+fn rounding_ops() -> impl Strategy<Value = Vec<(u8, i64, u32, bool)>> {
+    let step = prop_oneof![
+        4 => 0..=3_i64,
+        2 => 0..=2_000_i64,
+        1 => 0..=400_000_i64,
+    ];
+    let cost = prop_oneof![8 => 1..=12_u32, 1 => 0..=40_u32, 1 => any::<u32>()];
+    prop::collection::vec((0..2_u8, step, cost, prop::bool::weighted(0.85)), 1..80)
+}
+
+/// Rounding to microseconds may only under-admit: given the same admitted
+/// hits, Redis never allows what the nanosecond memory store denies. Redis
+/// may deny what memory allows, so memory records only what Redis
+/// admitted, or the two histories would part and the comparison mean
+/// nothing.
+fn redis_never_admits_what_memory_denies<A: crate::Algorithm + Default>(token_bucket: bool) {
+    use crate::{Limiter, ManualClock, Timestamp};
+
+    let Some(server) = server() else { return };
+    let runtime = runtime();
+    let client = ::redis::Client::open(server.url.as_str()).unwrap();
+    let connection = runtime
+        .block_on(client.get_multiplexed_async_connection())
+        .unwrap();
+    let start = start_us();
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(96);
+    let mut runner = TestRunner::new(Config::with_cases(cases));
+    // (both allowed, only memory allowed), to show the runs aren't vacuous.
+    let tally = std::cell::Cell::new((0_u32, 0_u32));
+    let result = runner.run(
+        &(rounding_quota(token_bucket), rounding_ops()),
+        |(quota, ops)| {
+            let mut connection = connection.clone();
+            runtime
+                .block_on(::redis::cmd("FLUSHALL").query_async::<()>(&mut connection))
+                .unwrap();
+            let clock = ManualClock::new();
+            let memory: Limiter<u8, A> = Limiter::builder()
+                .algorithm(A::default())
+                .quota(quota)
+                .clock(clock.clone())
+                .build();
+            let mut now = start;
+            for (key, step, cost, record) in ops {
+                now = now.saturating_add_signed(step);
+                clock.set(Timestamp::from_nanos(now * 1_000));
+                let keys: Vec<String> = (0..quota.rates().len())
+                    .map(|rate| format!("test:{{{key}}}:{rate}"))
+                    .collect();
+                let redis = script_at::<A>(
+                    &runtime,
+                    &mut connection,
+                    &quota,
+                    &keys,
+                    (record, cost, now),
+                );
+                let redis_allowed = matches!(redis, Outcome::Allowed(_));
+                let local = runtime.block_on(memory.test_n(&key, cost)).unwrap();
+                let context = format!("{quota} key {key} at {now} cost {cost} record {record}");
+                prop_assert!(
+                    !redis_allowed || local.is_allowed(),
+                    "Redis allowed what memory denies: {}",
+                    context
+                );
+                let (both, only_memory) = tally.get();
+                tally.set(match (redis_allowed, local.is_allowed()) {
+                    (true, _) => (both + 1, only_memory),
+                    (false, true) => (both, only_memory + 1),
+                    (false, false) => (both, only_memory),
+                });
+                if record && redis_allowed {
+                    let recorded = runtime.block_on(memory.hit_n(&key, cost)).unwrap();
+                    prop_assert!(recorded.is_allowed(), "{}", context);
+                }
+            }
+            Ok::<(), TestCaseError>(())
+        },
+    );
+    if let Err(error) = result {
+        panic!("{error}");
+    }
+    let (both, only_memory) = tally.get();
+    assert!(both > 0, "some hits were allowed");
+    if token_bucket {
+        assert!(only_memory > 0, "some runs reached the rounding");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn redis_token_buckets_never_admit_what_memory_denies() {
+    redis_never_admits_what_memory_denies::<TokenBucket>(true);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn redis_fixed_windows_never_admit_what_memory_denies() {
+    redis_never_admits_what_memory_denies::<FixedWindow>(false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn redis_sliding_windows_never_admit_what_memory_denies() {
+    redis_never_admits_what_memory_denies::<SlidingWindow>(false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn redis_sliding_logs_never_admit_what_memory_denies() {
+    redis_never_admits_what_memory_denies::<SlidingLog>(false);
 }
