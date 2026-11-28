@@ -19,6 +19,13 @@ use super::{
 /// Sliding window counter: weights the previous window's count by how much
 /// of it still overlaps the last period. Smooths fixed window's edge burst
 /// with two counters per key.
+///
+/// The weighted part is rounded up, so it never admits more than the
+/// count in any period, but under steady demand it admits one unit fewer
+/// per window than the count: a previous window that was full still
+/// weighs at least 1 until the current window ends. At `3/second` that is
+/// 2 a second. Choose [`SlidingLog`](crate::SlidingLog) for exact counts,
+/// or [`TokenBucket`](crate::TokenBucket) for smooth limits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct SlidingWindow;
 
