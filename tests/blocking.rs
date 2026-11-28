@@ -37,8 +37,10 @@ fn shares_state_with_the_async_limiter_it_came_from() {
 #[test]
 fn until_ready_sleeps_until_there_is_room() {
     let limiter: Limiter<u64> = Limiter::memory(quota!("100/second"));
-    assert!(limiter.hit_n(&1, 100).unwrap().is_allowed());
+    // Started before the burst: the next unit comes 10 ms after it, however
+    // long the burst itself takes (under Miri, long).
     let start = Instant::now();
+    assert!(limiter.hit_n(&1, 100).unwrap().is_allowed());
     assert!(limiter.until_ready(&1).unwrap().is_allowed());
     assert!(start.elapsed() >= Duration::from_millis(9));
     let Ok(Decision::Denied(denial)) = limiter.until_ready_n(&1, 101) else {
