@@ -25,6 +25,7 @@ use crate::algorithm::{Outcome, Retry, Spec, Stats, Unit, check_quota_in};
 use crate::quota::MAX_RATES;
 use crate::{FixedWindow, Quota, Rate, SlidingLog, SlidingWindow, TokenBucket};
 
+mod deny_cache;
 mod fallback;
 mod global;
 mod limiter;

@@ -2,6 +2,7 @@
 //! Redis, so any number of instances sharing a Redis enforce one limit.
 
 pub(crate) mod breaker;
+mod deny_cache;
 pub(crate) mod fallback;
 pub(crate) mod scripts;
 #[cfg(test)]
@@ -9,6 +10,7 @@ pub(crate) mod tests;
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -19,6 +21,7 @@ use ::redis::sentinel::{SentinelClient, SentinelNodeConnectionInfo, SentinelServ
 use ::redis::{Cmd, ConnectionAddr, IntoConnectionInfo, Pipeline, RedisFuture, TlsMode, Value};
 
 use self::breaker::{Breaker, CircuitBreaker};
+use self::deny_cache::DenyCache;
 use self::fallback::Fallback;
 use self::scripts::Scripted;
 use super::{FailurePolicy, Policy, sealed};
@@ -53,6 +56,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// A hit that timed out may still reach a slow Redis and be recorded after
 /// its caller got the policy's answer. It then spends units the caller may
 /// have been refused, which under-admits but never over-admits.
+///
+/// With a [deny cache](RedisStoreBuilder::deny_cache), a key Redis denied
+/// is denied on this instance without asking Redis until it may retry.
 ///
 /// Cloning is cheap; clones share the connection.
 ///
@@ -105,7 +111,9 @@ struct Shared {
     breaker: Breaker,
     timeout: Duration,
     on_failure: OnFailure,
-    /// Times the fallback reads; monotonic, local to this instance.
+    deny_cache: Option<DenyCache>,
+    /// Times the deny cache and the fallback read; monotonic, local to this
+    /// instance.
     clock: MonotonicClock,
 }
 
@@ -220,6 +228,7 @@ pub struct RedisStoreBuilder<P, T = Direct> {
     timeout: Duration,
     breaker: CircuitBreaker,
     policy: P,
+    deny_cache: Option<NonZeroUsize>,
 }
 
 /// What `connect` passes on to the store.
@@ -228,6 +237,7 @@ struct Settings {
     policy: Policy,
     timeout: Duration,
     breaker: CircuitBreaker,
+    deny_cache: Option<NonZeroUsize>,
 }
 
 impl RedisStore<NoPolicy> {
@@ -290,6 +300,7 @@ impl<T> RedisStoreBuilder<NoPolicy, T> {
             timeout: DEFAULT_TIMEOUT,
             breaker: CircuitBreaker::new(),
             policy: NoPolicy,
+            deny_cache: None,
         }
     }
 }
@@ -303,6 +314,7 @@ impl<P, T> RedisStoreBuilder<P, T> {
             timeout: self.timeout,
             breaker: self.breaker,
             policy,
+            deny_cache: self.deny_cache,
         }
     }
 
@@ -324,6 +336,50 @@ impl<P, T> RedisStoreBuilder<P, T> {
         self.breaker = breaker;
         self
     }
+
+    /// Remembers up to `max_keys` denials on this instance: after Redis
+    /// denies a key, further hits on it are denied here, without a round
+    /// trip, until the denial's [`retry_after`](crate::Denial::retry_after)
+    /// has passed by this instance's clock. Off by default.
+    ///
+    /// It sheds load from keys that keep hitting a limit, as during a
+    /// flood, and it never allows anything: a cached denial is one Redis
+    /// gave. But it denies more than Redis would in three cases:
+    ///
+    /// - A denial of `cost` units also denies smaller costs until it ends,
+    ///   though they may fit sooner.
+    /// - [`reset`](crate::Limiter#method.reset-1) clears a key's cached
+    ///   denial on this instance only; other instances keep denying it
+    ///   until their denial ends.
+    /// - Time spent in transit counts against the client: the denial ends a
+    ///   round trip later than Redis said.
+    ///
+    /// Denials that will never fit ([`retry_after`](crate::Denial::retry_after)
+    /// is `None`) and denials by the failure policy aren't cached. When
+    /// `max_keys` denials are live, new ones aren't cached until some end.
+    /// Cached answers are denials with Redis's stats and `retry_after`,
+    /// less the time since.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::num::NonZeroUsize;
+    ///
+    /// use porin::store::{FailClosed, RedisStore};
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let redis = RedisStore::builder("redis://127.0.0.1/")
+    ///     .on_failure(FailClosed)
+    ///     .deny_cache(NonZeroUsize::new(100_000).ok_or("zero")?)
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub const fn deny_cache(mut self, max_keys: NonZeroUsize) -> Self {
+        self.deny_cache = Some(max_keys);
+        self
+    }
 }
 
 impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
@@ -332,6 +388,7 @@ impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
             policy: self.policy.policy(),
             timeout: self.timeout,
             breaker: self.breaker,
+            deny_cache: self.deny_cache,
         };
         (self.target, settings)
     }
@@ -539,6 +596,7 @@ impl<P> RedisStore<P> {
             policy,
             timeout,
             breaker,
+            deny_cache,
         } = settings;
         Self {
             shared: Arc::new(Shared {
@@ -552,6 +610,7 @@ impl<P> RedisStore<P> {
                 ),
                 timeout,
                 on_failure: policy.into(),
+                deny_cache: deny_cache.map(DenyCache::new),
                 clock: MonotonicClock::new(),
             }),
             policy: PhantomData,
@@ -576,6 +635,17 @@ impl<P: FailurePolicy> RedisStore<P> {
             record,
             cost,
         };
+        // A cost of 0 asks for stats, which a denial doesn't hold to date.
+        let cache = shared
+            .deny_cache
+            .as_ref()
+            .zip(keys.first())
+            .filter(|_| cost > 0);
+        if let Some((cache, key)) = cache {
+            if let Some(denial) = cache.denial(key, cost, shared.clock.now()) {
+                return Ok(denial);
+            }
+        }
         if let Err(retry_after) = shared.breaker.admit() {
             return shared.fail::<A>(&call, retry_after, None);
         }
@@ -591,7 +661,18 @@ impl<P: FailurePolicy> RedisStore<P> {
         match answer {
             Some(Ok(reply)) => {
                 shared.breaker.succeeded();
-                Ok(decision(reply.outcome()))
+                let outcome = reply.outcome();
+                if let (
+                    Some((cache, key)),
+                    Outcome::Denied {
+                        stats,
+                        retry: Retry::After(retry_after),
+                    },
+                ) = (cache, outcome)
+                {
+                    cache.insert(key, cost, stats, retry_after, shared.clock.now());
+                }
+                Ok(decision(outcome))
             }
             Some(Err(error)) => match shared.failure(&error) {
                 Failure::Permanent => Err(store_error(error)),
@@ -743,10 +824,13 @@ impl Shared {
         }
     }
 
-    /// Forgets the key whose rates live at `keys` in this instance's
-    /// fallback.
+    /// Forgets the key whose rates live at `keys` in this instance's deny
+    /// cache and fallback.
     fn forget(&self, keys: &[String]) {
         let Some(key) = keys.first() else { return };
+        if let Some(cache) = &self.deny_cache {
+            cache.remove(key);
+        }
         if let OnFailure::FailOver(fallback) = &self.on_failure {
             fallback.reset(key);
         }
@@ -792,6 +876,7 @@ impl<P> fmt::Debug for RedisStore<P> {
             .field("mode", &mode)
             .field("timeout", &self.shared.timeout)
             .field("policy", &std::any::type_name::<P>())
+            .field("deny_cache", &self.shared.deny_cache.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -803,6 +888,7 @@ impl<P, T: fmt::Debug> fmt::Debug for RedisStoreBuilder<P, T> {
             .field("target", &self.target)
             .field("timeout", &self.timeout)
             .field("circuit_breaker", &self.breaker)
+            .field("deny_cache", &self.deny_cache)
             .finish_non_exhaustive()
     }
 }

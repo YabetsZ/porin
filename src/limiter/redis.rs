@@ -189,7 +189,7 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
     }
 
     /// Forgets `key`, giving it its full allowance back. Once Redis has
-    /// forgotten it, so does this instance's fallback, if any; other
+    /// forgotten it, so do this instance's deny cache and fallback; other
     /// instances keep theirs.
     ///
     /// # Errors
