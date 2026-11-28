@@ -2,6 +2,7 @@
 //! Redis, so any number of instances sharing a Redis enforce one limit.
 
 pub(crate) mod breaker;
+pub(crate) mod fallback;
 pub(crate) mod scripts;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -18,11 +19,12 @@ use ::redis::sentinel::{SentinelClient, SentinelNodeConnectionInfo, SentinelServ
 use ::redis::{Cmd, ConnectionAddr, IntoConnectionInfo, Pipeline, RedisFuture, TlsMode, Value};
 
 use self::breaker::{Breaker, CircuitBreaker};
+use self::fallback::Fallback;
 use self::scripts::Scripted;
 use super::{FailurePolicy, Policy, sealed};
 use crate::algorithm::{Outcome, Retry, Spec, Stats, Unit};
 use crate::limiter::{Decision, Error};
-use crate::{Quota, Rate};
+use crate::{Clock, MonotonicClock, Quota, Rate};
 
 /// How long a call waits for Redis unless [`RedisStoreBuilder::timeout`]
 /// says otherwise.
@@ -42,9 +44,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// `P` is what limiters answer when Redis fails or doesn't answer within
 /// the [timeout](RedisStoreBuilder::timeout): [`FailOpen`](super::FailOpen),
-/// [`FailClosed`](super::FailClosed) or [`Propagate`](super::Propagate).
-/// After 3 failures in a row the store stops asking Redis for a while,
-/// growing from 100 ms to 5 s, and answers by `P` at once; see
+/// [`FailClosed`](super::FailClosed), [`Propagate`](super::Propagate), or
+/// [`FailOver`](super::FailOver) to a smaller limit kept in memory on each
+/// instance. After 3 failures in a row the store stops asking Redis for a
+/// while, growing from 100 ms to 5 s, and answers by `P` at once; see
 /// [`CircuitBreaker`].
 ///
 /// A hit that timed out may still reach a slow Redis and be recorded after
@@ -101,6 +104,36 @@ struct Shared {
     source: Source,
     breaker: Breaker,
     timeout: Duration,
+    on_failure: OnFailure,
+    /// Times the fallback reads; monotonic, local to this instance.
+    clock: MonotonicClock,
+}
+
+/// The failure policy, with any state it keeps.
+enum OnFailure {
+    Open,
+    Closed,
+    Propagate,
+    FailOver(Box<Fallback>),
+}
+
+impl From<Policy> for OnFailure {
+    fn from(policy: Policy) -> Self {
+        match policy {
+            Policy::Open => Self::Open,
+            Policy::Closed => Self::Closed,
+            Policy::Propagate => Self::Propagate,
+            Policy::FailOver(settings) => Self::FailOver(Box::new(Fallback::new(settings))),
+        }
+    }
+}
+
+/// What one call asks of Redis.
+struct Call<'a> {
+    quota: &'a Quota,
+    keys: &'a [String],
+    record: bool,
+    cost: u32,
 }
 
 enum Source {
@@ -186,7 +219,15 @@ pub struct RedisStoreBuilder<P, T = Direct> {
     target: T,
     timeout: Duration,
     breaker: CircuitBreaker,
-    policy: PhantomData<P>,
+    policy: P,
+}
+
+/// What `connect` passes on to the store.
+#[derive(Clone, Copy)]
+struct Settings {
+    policy: Policy,
+    timeout: Duration,
+    breaker: CircuitBreaker,
 }
 
 impl RedisStore<NoPolicy> {
@@ -242,24 +283,26 @@ impl RedisStore<NoPolicy> {
     }
 }
 
-impl<P, T> RedisStoreBuilder<P, T> {
+impl<T> RedisStoreBuilder<NoPolicy, T> {
     const fn new(target: T) -> Self {
         Self {
             target,
             timeout: DEFAULT_TIMEOUT,
             breaker: CircuitBreaker::new(),
-            policy: PhantomData,
+            policy: NoPolicy,
         }
     }
+}
 
+impl<P, T> RedisStoreBuilder<P, T> {
     /// What limiters answer when Redis fails or doesn't answer in time.
     /// Required, because each choice is wrong for some service.
-    pub fn on_failure<F: FailurePolicy>(self, _policy: F) -> RedisStoreBuilder<F, T> {
+    pub fn on_failure<F: FailurePolicy>(self, policy: F) -> RedisStoreBuilder<F, T> {
         RedisStoreBuilder {
             target: self.target,
             timeout: self.timeout,
             breaker: self.breaker,
-            policy: PhantomData,
+            policy,
         }
     }
 
@@ -280,6 +323,17 @@ impl<P, T> RedisStoreBuilder<P, T> {
     pub const fn circuit_breaker(mut self, breaker: CircuitBreaker) -> Self {
         self.breaker = breaker;
         self
+    }
+}
+
+impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
+    fn settings(self) -> (T, Settings) {
+        let settings = Settings {
+            policy: self.policy.policy(),
+            timeout: self.timeout,
+            breaker: self.breaker,
+        };
+        (self.target, settings)
     }
 }
 
@@ -315,19 +369,15 @@ impl<P: FailurePolicy> RedisStoreBuilder<P> {
     /// checked within a second each, refuses the credentials or a command,
     /// or is a replica.
     pub async fn connect(self) -> Result<RedisStore<P>, Error> {
-        let (connection, source) = match &self.target.0 {
+        let (Direct(target), settings) = self.settings();
+        let (connection, source) = match target {
             Target::Node(url) => {
                 let client = ::redis::Client::open(url.as_str()).map_err(store_error)?;
                 (node_client(client.clone()).await?, Source::Node(client))
             }
-            Target::Cluster(urls) => (cluster(urls).await?, Source::Cluster),
+            Target::Cluster(urls) => (cluster(&urls).await?, Source::Cluster),
         };
-        Ok(RedisStore::new(
-            connection,
-            source,
-            self.timeout,
-            self.breaker,
-        ))
+        Ok(RedisStore::new(connection, source, settings))
     }
 }
 
@@ -341,11 +391,14 @@ impl<P: FailurePolicy> RedisStoreBuilder<P, ViaSentinel> {
     /// can't be reached within a second each, or the primary refuses the
     /// credentials or a command.
     pub async fn connect(self) -> Result<RedisStore<P>, Error> {
-        let ViaSentinel {
-            urls,
-            primary,
-            primary_url,
-        } = self.target;
+        let (
+            ViaSentinel {
+                urls,
+                primary,
+                primary_url,
+            },
+            settings,
+        ) = self.settings();
         let node = primary_url.as_deref().map(primary_node).transpose()?;
         let sentinel = Sentinel {
             urls,
@@ -356,8 +409,7 @@ impl<P: FailurePolicy> RedisStoreBuilder<P, ViaSentinel> {
         Ok(RedisStore::new(
             connection,
             Source::Sentinel(sentinel),
-            self.timeout,
-            self.breaker,
+            settings,
         ))
     }
 }
@@ -482,12 +534,12 @@ async fn within<T>(limit: Duration, future: impl Future<Output = T>) -> Option<T
 }
 
 impl<P> RedisStore<P> {
-    fn new(
-        connection: Connection,
-        source: Source,
-        timeout: Duration,
-        breaker: CircuitBreaker,
-    ) -> Self {
+    fn new(connection: Connection, source: Source, settings: Settings) -> Self {
+        let Settings {
+            policy,
+            timeout,
+            breaker,
+        } = settings;
         Self {
             shared: Arc::new(Shared {
                 connection: RwLock::new(connection),
@@ -499,6 +551,8 @@ impl<P> RedisStore<P> {
                     timeout.saturating_add(CONNECT_TIMEOUT.saturating_mul(3)),
                 ),
                 timeout,
+                on_failure: policy.into(),
+                clock: MonotonicClock::new(),
             }),
             policy: PhantomData,
         }
@@ -516,8 +570,14 @@ impl<P: FailurePolicy> RedisStore<P> {
         cost: u32,
     ) -> Result<Decision, Error> {
         let shared = &*self.shared;
+        let call = Call {
+            quota,
+            keys,
+            record,
+            cost,
+        };
         if let Err(retry_after) = shared.breaker.admit() {
-            return fail::<P>(retry_after, None);
+            return shared.fail::<A>(&call, retry_after, None);
         }
         if shared.breaker.should_reconnect() {
             self.reconnect().await;
@@ -535,14 +595,17 @@ impl<P: FailurePolicy> RedisStore<P> {
             }
             Some(Err(error)) => match shared.failure(&error) {
                 Failure::Permanent => Err(store_error(error)),
-                Failure::Outage(retry_after) => fail::<P>(retry_after, Some(store_error(error))),
+                Failure::Outage(retry_after) => {
+                    shared.fail::<A>(&call, retry_after, Some(store_error(error)))
+                }
             },
-            None => fail::<P>(shared.breaker.failed(), Some(timed_out())),
+            None => shared.fail::<A>(&call, shared.breaker.failed(), Some(timed_out())),
         }
     }
 
-    /// Deletes `keys`, through the breaker and the timeout. There is no
-    /// decision to fall back on, so failures are errors whatever `P` is.
+    /// Deletes `keys`, through the breaker and the timeout, then forgets
+    /// the key on this instance. There is no decision to fall back on, so
+    /// failures are errors whatever `P` is, and forget nothing.
     pub(crate) async fn delete(&self, keys: &[String]) -> Result<(), Error> {
         let shared = &*self.shared;
         if shared.breaker.admit().is_err() {
@@ -555,6 +618,7 @@ impl<P: FailurePolicy> RedisStore<P> {
         match within(shared.timeout, deleting).await {
             Some(Ok(())) => {
                 shared.breaker.succeeded();
+                shared.forget(keys);
                 Ok(())
             }
             Some(Err(error)) => {
@@ -655,23 +719,44 @@ impl Shared {
         Failure::Outage(self.breaker.failed())
     }
 
+    /// The policy's answer to a failure. `error` is `None` when the breaker
+    /// answered without asking Redis.
+    fn fail<A: Scripted>(
+        &self,
+        call: &Call<'_>,
+        retry_after: Duration,
+        error: Option<Error>,
+    ) -> Result<Decision, Error> {
+        match &self.on_failure {
+            OnFailure::Open => Ok(Decision::allowed_unconfirmed()),
+            OnFailure::Closed => Ok(Decision::denied_unavailable(retry_after)),
+            OnFailure::Propagate => {
+                Err(error.unwrap_or_else(|| Error::Store("Redis is unavailable".into())))
+            }
+            OnFailure::FailOver(fallback) => Ok(call
+                .keys
+                .first()
+                .and_then(|key| {
+                    fallback.decide::<A>(call.quota, key, call.record, call.cost, self.clock.now())
+                })
+                .unwrap_or_else(|| Decision::denied_unavailable(retry_after))),
+        }
+    }
+
+    /// Forgets the key whose rates live at `keys` in this instance's
+    /// fallback.
+    fn forget(&self, keys: &[String]) {
+        let Some(key) = keys.first() else { return };
+        if let OnFailure::FailOver(fallback) = &self.on_failure {
+            fallback.reset(key);
+        }
+    }
+
     fn connection(&self) -> Connection {
         self.connection
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-}
-
-/// The policy's answer to a failure. `error` is `None` when the breaker
-/// answered without asking Redis.
-fn fail<P: FailurePolicy>(retry_after: Duration, error: Option<Error>) -> Result<Decision, Error> {
-    match P::POLICY {
-        Policy::Open => Ok(Decision::allowed_unconfirmed()),
-        Policy::Closed => Ok(Decision::denied_unavailable(retry_after)),
-        Policy::Propagate => {
-            Err(error.unwrap_or_else(|| Error::Store("Redis is unavailable".into())))
-        }
     }
 }
 

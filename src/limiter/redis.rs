@@ -173,9 +173,9 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
     }
 
     /// What `key` has left, without spending anything. Not
-    /// [known](Stats::is_known) if Redis didn't answer and the policy is
-    /// [`FailOpen`](crate::store::FailOpen) or
-    /// [`FailClosed`](crate::store::FailClosed).
+    /// [known](Stats::is_known) if Redis didn't answer and the failure
+    /// policy did; under [`FailOver`](crate::store::FailOver), the
+    /// fallback's own [stats](Stats::is_fallback).
     ///
     /// # Errors
     ///
@@ -188,7 +188,9 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
         Ok(self.decide(key, false, 0).await?.stats())
     }
 
-    /// Forgets `key`, giving it its full allowance back.
+    /// Forgets `key`, giving it its full allowance back. Once Redis has
+    /// forgotten it, so does this instance's fallback, if any; other
+    /// instances keep theirs.
     ///
     /// # Errors
     ///

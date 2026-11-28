@@ -5,9 +5,11 @@
 //! if all of them allow it. Redis runs a script atomically, so instances
 //! sharing a Redis can never both take the last unit.
 
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
+use super::fallback::Fallback;
 use crate::algorithm::Algorithm;
+use crate::store::memory::MemoryStore;
 use crate::{FixedWindow, Rate, SlidingLog, SlidingWindow, TokenBucket};
 
 macro_rules! script {
@@ -35,12 +37,16 @@ pub(crate) fn all() -> [&'static ::redis::Script; 4] {
 }
 
 /// An algorithm with a Redis script.
-pub(crate) trait Scripted: Algorithm {
+pub(crate) trait Scripted: Algorithm + crate::store::memory::Stored {
     /// The algorithm's name in Redis keys. Never change one: that would
     /// orphan every key in use.
     const NAME: &'static str;
 
     fn script() -> &'static ::redis::Script;
+
+    /// This algorithm's in-memory fallback limiter, for
+    /// [`FailOver`](crate::store::FailOver).
+    fn fallback(fallback: &Fallback) -> &OnceLock<MemoryStore<String, Self>>;
 
     /// Whether the script counts `rate` exactly.
     fn fits(_rate: Rate) -> bool {
@@ -55,6 +61,10 @@ impl Scripted for TokenBucket {
         &TOKEN_BUCKET
     }
 
+    fn fallback(fallback: &Fallback) -> &OnceLock<MemoryStore<String, Self>> {
+        fallback.token_bucket()
+    }
+
     fn fits(rate: Rate) -> bool {
         super::token_bucket_fits(rate)
     }
@@ -66,6 +76,10 @@ impl Scripted for FixedWindow {
     fn script() -> &'static ::redis::Script {
         &FIXED_WINDOW
     }
+
+    fn fallback(fallback: &Fallback) -> &OnceLock<MemoryStore<String, Self>> {
+        fallback.fixed_window()
+    }
 }
 
 impl Scripted for SlidingWindow {
@@ -74,6 +88,10 @@ impl Scripted for SlidingWindow {
     fn script() -> &'static ::redis::Script {
         &SLIDING_WINDOW
     }
+
+    fn fallback(fallback: &Fallback) -> &OnceLock<MemoryStore<String, Self>> {
+        fallback.sliding_window()
+    }
 }
 
 impl Scripted for SlidingLog {
@@ -81,5 +99,9 @@ impl Scripted for SlidingLog {
 
     fn script() -> &'static ::redis::Script {
         &SLIDING_LOG
+    }
+
+    fn fallback(fallback: &Fallback) -> &OnceLock<MemoryStore<String, Self>> {
+        fallback.sliding_log()
     }
 }

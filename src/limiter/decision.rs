@@ -48,7 +48,7 @@ impl Decision {
                 stats: Stats {
                     remaining: 0,
                     reset_after: retry_after,
-                    known: true,
+                    source: Source::Store,
                     limiting: 0,
                     limiting_reset: retry_after,
                 },
@@ -67,7 +67,7 @@ impl Decision {
         Self::Allowed(Stats {
             remaining: 0,
             reset_after: Duration::ZERO,
-            known: false,
+            source: Source::Policy,
             limiting: 0,
             limiting_reset: Duration::ZERO,
         })
@@ -83,13 +83,25 @@ impl Decision {
             stats: Stats {
                 remaining: 0,
                 reset_after: Duration::ZERO,
-                known: false,
+                source: Source::Policy,
                 limiting: 0,
                 limiting_reset: Duration::ZERO,
             },
             retry_after: Some(retry_after),
             cause: Cause::StoreUnavailable,
         })
+    }
+
+    /// The answer of [`FailOver`](crate::store::FailOver)'s fallback
+    /// limiter: its decision, with stats marked as the fallback's.
+    #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+    pub(crate) fn from_fallback(hit: Hit) -> Self {
+        let mut decision = Self::from_hit(hit);
+        match &mut decision {
+            Self::Allowed(stats) => stats.source = Source::Fallback,
+            Self::Denied(denial) => denial.stats.source = Source::Fallback,
+        }
+        decision
     }
 }
 
@@ -99,34 +111,63 @@ impl Decision {
 pub struct Stats {
     remaining: u32,
     reset_after: Duration,
-    known: bool,
+    source: Source,
     /// Which rate of the quota is closest to running out, and its own
     /// reset, for headers that describe a single rate.
     pub(crate) limiting: u8,
     pub(crate) limiting_reset: Duration,
 }
 
+/// Who reported a [`Stats`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Source {
+    /// The limiter's store.
+    Store,
+    /// Nobody: a remote store didn't answer and the failure policy did.
+    Policy,
+    /// [`FailOver`](crate::store::FailOver)'s per-instance fallback limiter.
+    #[cfg_attr(
+        not(any(feature = "redis-tokio", feature = "redis-smol")),
+        expect(dead_code, reason = "only a Redis store has a fallback")
+    )]
+    Fallback,
+}
+
 impl Stats {
     /// Units that can still be spent now, after this hit if it was allowed.
-    /// 0 when the stats aren't [known](Self::is_known).
+    /// 0 when the failure policy answered; the fallback's own when
+    /// [`is_fallback`](Self::is_fallback).
     #[must_use]
     pub const fn remaining(&self) -> u32 {
         self.remaining
     }
 
     /// Time until the key is back to its full allowance, if nothing more is
-    /// spent. Zero when the stats aren't [known](Self::is_known).
+    /// spent. Zero when the failure policy answered; the fallback's own when
+    /// [`is_fallback`](Self::is_fallback).
     #[must_use]
     pub const fn reset_after(&self) -> Duration {
         self.reset_after
     }
 
-    /// Whether the store reported these stats. False when a remote store
-    /// didn't answer and the limiter decided by its failure policy; skip
-    /// `RateLimit-*` headers then.
+    /// Whether the limiter's store reported these stats. False when a
+    /// remote store didn't answer and the limiter decided by its failure
+    /// policy, including [`FailOver`](crate::store::FailOver)'s fallback;
+    /// skip `RateLimit-*` headers then, since they would describe the
+    /// limiter's quota.
     #[must_use]
     pub const fn is_known(&self) -> bool {
-        self.known
+        matches!(self.source, Source::Store)
+    }
+
+    /// Whether a remote store didn't answer and
+    /// [`FailOver`](crate::store::FailOver)'s per-instance fallback limiter
+    /// decided instead. [`remaining`](Self::remaining) and
+    /// [`reset_after`](Self::reset_after) are then the fallback's, for its
+    /// smaller quota on this instance alone.
+    #[must_use]
+    pub const fn is_fallback(&self) -> bool {
+        matches!(self.source, Source::Fallback)
     }
 }
 
@@ -135,7 +176,7 @@ impl From<CoreStats> for Stats {
         Self {
             remaining: stats.remaining,
             reset_after: stats.reset_after,
-            known: true,
+            source: Source::Store,
             limiting: stats.limiting,
             limiting_reset: stats.limiting_reset,
         }

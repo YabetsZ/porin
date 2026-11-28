@@ -11,6 +11,8 @@ use std::time::Duration;
 #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
 pub use self::redis::breaker::CircuitBreaker;
 #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub use self::redis::fallback::FailOver;
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
 pub use self::redis::{Direct, NoPolicy, RedisStore, RedisStoreBuilder, ViaSentinel};
 use crate::Quota;
 use crate::algorithm::{Outcome, Retry, Stats};
@@ -31,7 +33,7 @@ pub(crate) mod sealed {
 
     pub trait FailurePolicy {
         #[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
-        const POLICY: super::Policy;
+        fn policy(self) -> super::Policy;
     }
 }
 
@@ -47,8 +49,9 @@ impl sealed::Store for Memory {
 impl Store for Memory {}
 
 /// What a remote store's limiter answers when the store fails or doesn't
-/// answer in time: [`FailOpen`], [`FailClosed`] or [`Propagate`]. There is
-/// no default, because each is wrong for some service. Sealed.
+/// answer in time: [`FailOpen`], [`FailClosed`], [`Propagate`] or, for
+/// Redis, `FailOver`. There is no default, because each is wrong for some
+/// service. Sealed.
 pub trait FailurePolicy: sealed::FailurePolicy + Copy + Send + Sync + 'static {}
 
 /// Allow the hit when the store fails. The service stays up through a store
@@ -73,19 +76,27 @@ pub(crate) enum Policy {
     Open,
     Closed,
     Propagate,
+    #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+    FailOver(self::redis::fallback::FailOver),
 }
 
 #[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
 impl sealed::FailurePolicy for FailOpen {
-    const POLICY: Policy = Policy::Open;
+    fn policy(self) -> Policy {
+        Policy::Open
+    }
 }
 #[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
 impl sealed::FailurePolicy for FailClosed {
-    const POLICY: Policy = Policy::Closed;
+    fn policy(self) -> Policy {
+        Policy::Closed
+    }
 }
 #[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
 impl sealed::FailurePolicy for Propagate {
-    const POLICY: Policy = Policy::Propagate;
+    fn policy(self) -> Policy {
+        Policy::Propagate
+    }
 }
 impl FailurePolicy for FailOpen {}
 impl FailurePolicy for FailClosed {}
