@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use super::{Algorithm, Check, Retry, Spec, Stats};
+use super::{Algorithm, Check, Retry, Spec, Stats, until_end};
 
 /// Sliding log: remembers the time of every unit spent in the last period
 /// and allows a hit only if the period holds room for it. Exact, but keeps
@@ -44,7 +44,7 @@ impl Algorithm for SlidingLog {
         let limit = spec.count;
 
         // A hit at time t counts while now < t + period.
-        let is_live = |time: u64| time.saturating_add(period) > now;
+        let is_live = |time: u64| until_end(time, period, now) > 0;
         let expired = state
             .entries
             .iter()
@@ -57,8 +57,7 @@ impl Algorithm for SlidingLog {
             .fold(0_u32, |sum, (_, cost)| sum.saturating_add(*cost));
         let used = state.total.saturating_sub(expired_cost);
         let live = || state.entries.iter().skip(expired);
-        let until_expiry =
-            |time: u64| spec.duration(time.saturating_add(period).saturating_sub(now));
+        let until_expiry = |time: u64| spec.duration(until_end(time, period, now));
         let reset_after = live()
             .last()
             .map_or(spec.duration(0), |(time, _)| until_expiry(*time));
@@ -213,6 +212,22 @@ mod tests {
         hit(rate, &mut state, at(5_000), 1);
         assert_eq!(state.entries.len(), 1);
         assert_eq!(state.total, 1);
+    }
+
+    #[test]
+    fn hits_in_the_last_period_before_the_largest_timestamp_still_count() {
+        // A hit at t counts until t + period, which can pass u64::MAX.
+        // Saturating there made such hits expire at once, allowing every hit.
+        let rate = per_second(2);
+        let mut state = SlidingLogState::default();
+        let half_second_before_the_end = Timestamp::from_nanos(u64::MAX - 500_000_000);
+        hit(rate, &mut state, half_second_before_the_end, 2);
+        let end = Timestamp::from_nanos(u64::MAX);
+        assert_eq!(
+            SlidingLog::check(rate, &state, end, 1).retry(),
+            Some(Retry::After(Duration::from_millis(500))),
+            "both units count until half a second past the end"
+        );
     }
 
     impl<C> Check<C> {

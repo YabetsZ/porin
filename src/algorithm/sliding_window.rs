@@ -12,7 +12,8 @@
 //! weighted part is rounded up, which errs towards denying.
 
 use super::{
-    Algorithm, Check, Retry, Spec, Stats, mul_div_ceil, mul_div_floor, saturate, window_start,
+    Algorithm, Check, Retry, Spec, Stats, mul_div_ceil, mul_div_floor, saturate, until_end,
+    window_start,
 };
 
 /// Sliding window counter: weights the previous window's count by how much
@@ -46,11 +47,7 @@ impl Algorithm for SlidingWindow {
         // Time left in the current window. If the clock went backwards into
         // an earlier window, `now` is before `start`; treating it as the
         // window's beginning weights `previous` fully, which under-admits.
-        let left = window
-            .start
-            .saturating_add(period)
-            .saturating_sub(now)
-            .min(period);
+        let left = until_end(window.start, period, now).min(period);
         let estimate = weighted(window.previous, left, period).saturating_add(window.current);
         let reset_after = if window.current > 0 {
             spec.duration(left.saturating_add(period))
@@ -229,6 +226,30 @@ mod tests {
         assert!(matches!(
             SlidingWindow::check(rate, &state, at(2_000), 10),
             Check::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_previous_window_still_weighs_in_the_last_window_before_the_largest_timestamp() {
+        // The window holding u64::MAX ns starts 709,551,615 ns before it,
+        // so at u64::MAX 290,448,385 ns of it are left and the previous
+        // window's 2 units weigh ⌈2 × 0.29⌉ = 1. Saturating the window's end
+        // at u64::MAX left nothing to weigh, allowing 2.
+        let rate = per_second(2);
+        let last_start = u64::MAX - 709_551_615;
+        let state = SlidingWindowState {
+            start: last_start - 1_000_000_000,
+            previous: 0,
+            current: 2,
+        };
+        let end = Timestamp::from_nanos(u64::MAX);
+        assert!(matches!(
+            SlidingWindow::check(rate, &state, end, 1),
+            Check::Allowed { .. }
+        ));
+        assert!(matches!(
+            SlidingWindow::check(rate, &state, end, 2),
+            Check::Denied { .. }
         ));
     }
 

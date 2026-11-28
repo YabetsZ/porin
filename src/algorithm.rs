@@ -318,6 +318,17 @@ fn saturate(value: u128) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+/// Ticks from `now` until `start + period`, saturating at `u64::MAX`. In
+/// u128, because that end passes `u64::MAX` when `start` is near it, and
+/// saturating it there would end windows and expire hits early.
+fn until_end(start: u64, period: u64, now: u64) -> u64 {
+    saturate(
+        u128::from(start)
+            .saturating_add(u128::from(period))
+            .saturating_sub(u128::from(now)),
+    )
+}
+
 /// The start of the period-aligned window that contains `now`.
 fn window_start(now: u64, period: u64) -> u64 {
     now.saturating_sub(now.checked_rem(period).unwrap_or(0))

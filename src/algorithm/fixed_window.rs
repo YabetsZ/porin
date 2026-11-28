@@ -4,7 +4,7 @@
 //! and again at the start of the next, so up to twice the limit can pass
 //! within a short span around a boundary.
 
-use super::{Algorithm, Check, Retry, Spec, Stats, window_start};
+use super::{Algorithm, Check, Retry, Spec, Stats, until_end, window_start};
 
 /// Fixed window: counts hits in windows aligned to the period, such as each
 /// whole minute, and resets the count when a new window starts.
@@ -43,7 +43,7 @@ impl Algorithm for FixedWindow {
         } else {
             (state.start, state.used)
         };
-        let window_end = spec.duration(start.saturating_add(period).saturating_sub(now));
+        let window_end = spec.duration(until_end(start, period, now));
         let report = |used: u32| Stats {
             remaining: limit.saturating_sub(used),
             // Nothing spent in this window means nothing to reset.
@@ -131,6 +131,24 @@ mod tests {
             Check::Denied {
                 stats: Stats::new(0, Duration::from_millis(750)),
                 retry: Retry::After(Duration::from_millis(750)),
+            }
+        );
+    }
+
+    #[test]
+    fn the_last_window_before_the_largest_timestamp_reports_a_real_wait() {
+        // The window holding u64::MAX ns starts 709,551,615 ns before it
+        // and would end 290,448,385 ns after it. Saturating the end there
+        // reported a wait of zero.
+        let rate = per_second(1);
+        let mut state = FixedWindowState::default();
+        let end = Timestamp::from_nanos(u64::MAX);
+        assert!(hit(rate, &mut state, end, 1));
+        assert_eq!(
+            FixedWindow::check(rate, &state, end, 1),
+            Check::Denied {
+                stats: Stats::new(0, Duration::from_nanos(290_448_385)),
+                retry: Retry::After(Duration::from_nanos(290_448_385)),
             }
         );
     }
