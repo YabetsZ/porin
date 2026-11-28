@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-11-28
+
+The tower layer, and Redis fail-over. The API may still change before 0.1.0.
+
 ### Added
 
 - `RateLimitLayer::exempt`: let requests a predicate picks through unlimited, such as health checks, without needing a key.
@@ -17,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RedisStoreBuilder::deny_cache`, off by default: after Redis denies a key, this instance denies it without asking Redis until the denial's `retry_after`, for up to a chosen number of keys. Denials that never fit and failure-policy denials aren't cached; a denial also covers smaller costs; `reset` clears it on this instance only.
 - `RedisStoreBuilder::on_event`, a hook called with `Event::BreakerOpened`, `Event::BreakerClosed` and `Event::Reconnected`, and `RedisStore::policy_answers`, a count of the calls the failure policy answered.
 - Features `axum_0_8` and `tonic_0_14`: `PeerIp` reads axum's `ConnectInfo` or tonic's `TcpConnectInfo`. Named for the version they support, so a later one can be added beside them. An axum example.
+
+### Changed
+
+- `RedisStore` and its builders are bounded by the new `RedisFailurePolicy` (every `FailurePolicy`, and `FailOver`) instead of `FailurePolicy`. Code generic over a Redis store's policy changes its bound.
+- Single-rate hits on the memory store are faster: about 42 ns instead of 49 ns on the benchmark machine.
+
+### Fixed
+
+- A Redis store reset a key whose state it couldn't read, admitting a full allowance; it now returns `Error::Store`.
+- Within one period of the clock's last nanosecond, the sliding log allowed every hit, the sliding window under-weighed the previous window, and the last fixed window reported no retry wait.
+- A full memory store at the clock's last nanosecond evicted keys still in use.
 
 ## [0.1.0-alpha.2] - 2026-11-28
 
@@ -61,6 +76,7 @@ First release, to reserve the name. The in-memory limiter is usable; the API may
 - Feature `memory` (on by default) for the in-memory limiter; without it only quotas, clocks and keys remain.
 - `blocking::Limiter` (feature `blocking`) for code without an async runtime. It shares state with the async `Limiter` it converts from.
 
-[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/YabetsZ/porin/releases/tag/v0.1.0-alpha.1
