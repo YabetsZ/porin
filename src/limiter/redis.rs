@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{Builder, Decision, Error, Limiter, NoQuota, Stats};
 use crate::key::KeyEncode;
@@ -230,21 +231,61 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
         K: Borrow<Q>,
         Q: KeyEncode + ?Sized,
     {
+        self.wait(key, cost, None).await
+    }
+
+    /// Spends one unit for `key`, waiting at most `max_wait`. See
+    /// [`Limiter::until_ready_within`](Limiter#method.until_ready_within)
+    /// on the memory store.
+    ///
+    /// # Errors
+    ///
+    /// As [`hit`](Self::hit).
+    pub async fn until_ready_within<Q>(
+        &self,
+        key: &Q,
+        max_wait: Duration,
+    ) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: KeyEncode + ?Sized,
+    {
+        self.wait(key, 1, Some(max_wait)).await
+    }
+
+    /// Spends `cost` units for `key`, waiting at most `max_wait`.
+    ///
+    /// # Errors
+    ///
+    /// As [`hit`](Self::hit).
+    pub async fn until_ready_n_within<Q>(
+        &self,
+        key: &Q,
+        cost: u32,
+        max_wait: Duration,
+    ) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: KeyEncode + ?Sized,
+    {
+        self.wait(key, cost, Some(max_wait)).await
+    }
+
+    async fn wait<Q>(
+        &self,
+        key: &Q,
+        cost: u32,
+        max_wait: Option<Duration>,
+    ) -> Result<Decision, Error>
+    where
+        Q: KeyEncode + ?Sized,
+    {
         let keys = self.keys(key)?;
-        loop {
-            let decision = self
-                .inner
-                .store
-                .decide::<A>(&self.inner.quota, &keys, true, cost)
-                .await?;
-            match decision {
-                Decision::Denied(denial) => match denial.retry_after() {
-                    Some(wait) => futures_timer::Delay::new(wait).await,
-                    None => return Ok(Decision::Denied(denial)),
-                },
-                allowed @ Decision::Allowed(_) => return Ok(allowed),
-            }
-        }
+        let inner = &*self.inner;
+        super::wait_for(max_wait, || {
+            inner.store.decide::<A>(&inner.quota, &keys, true, cost)
+        })
+        .await
     }
 
     /// The quota every key is limited to.

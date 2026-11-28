@@ -10,6 +10,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use self::decision::{Decision, Denial, Stats};
 use crate::store::memory::{MemoryStore, Stored};
@@ -351,15 +352,66 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A, Memory> {
         K: Borrow<Q>,
         Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
     {
-        loop {
-            match self.hit_n(key, cost).await? {
-                Decision::Denied(denial) => match denial.retry_after() {
-                    Some(wait) => futures_timer::Delay::new(wait).await,
-                    None => return Ok(Decision::Denied(denial)),
-                },
-                allowed @ Decision::Allowed(_) => return Ok(allowed),
-            }
-        }
+        wait_for(None, || self.hit_n(key, cost)).await
+    }
+
+    /// Spends one unit for `key`, waiting at most `max_wait` for the quota
+    /// to allow it. If the unit can't come in time, returns the denial at
+    /// once and spends nothing; a cost that never fits is denied at once.
+    ///
+    /// The wait is decided before sleeping, from each denial's
+    /// [`retry_after`](Denial::retry_after). If other callers take the room
+    /// meanwhile, a later check can still run out of time.
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use porin::{Limiter, quota};
+    ///
+    /// # pollster::block_on(async {
+    /// let limiter: Limiter<String> = Limiter::memory(quota!("1/minute"));
+    /// assert!(limiter.hit("api").await?.is_allowed());
+    /// // The next unit is a minute away: don't wait for it.
+    /// let decision = limiter.until_ready_within("api", Duration::from_secs(1)).await?;
+    /// assert!(!decision.is_allowed());
+    /// # Ok::<(), porin::Error>(())
+    /// # }).unwrap();
+    /// ```
+    pub async fn until_ready_within<Q>(
+        &self,
+        key: &Q,
+        max_wait: Duration,
+    ) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        self.until_ready_n_within(key, 1, max_wait).await
+    }
+
+    /// Spends `cost` units for `key`, waiting at most `max_wait`. See
+    /// [`until_ready_within`](Self::until_ready_within).
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    pub async fn until_ready_n_within<Q>(
+        &self,
+        key: &Q,
+        cost: u32,
+        max_wait: Duration,
+    ) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        wait_for(Some(max_wait), || self.hit_n(key, cost)).await
     }
 
     /// The quota every key is limited to.
@@ -385,6 +437,36 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A, Memory> {
         let inner = &*self.inner;
         let now = inner.clock.now();
         with_store!(&inner.store, store => store.test(&inner.quota, key, now, cost))
+    }
+}
+
+/// Hits until allowed, sleeping each denial's `retry_after`. Stops with
+/// the denial when the cost never fits, or when waiting would pass
+/// `max_wait`.
+pub(crate) async fn wait_for<F, H>(
+    max_wait: Option<Duration>,
+    mut hit: F,
+) -> Result<Decision, Error>
+where
+    F: FnMut() -> H,
+    H: Future<Output = Result<Decision, Error>>,
+{
+    let start = std::time::Instant::now();
+    loop {
+        match hit().await? {
+            Decision::Denied(denial) => {
+                let Some(wait) = denial.retry_after() else {
+                    return Ok(Decision::Denied(denial));
+                };
+                let too_late =
+                    max_wait.is_some_and(|max| start.elapsed().saturating_add(wait) > max);
+                if too_late {
+                    return Ok(Decision::Denied(denial));
+                }
+                futures_timer::Delay::new(wait).await;
+            }
+            allowed @ Decision::Allowed(_) => return Ok(allowed),
+        }
     }
 }
 

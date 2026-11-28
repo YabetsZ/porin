@@ -25,6 +25,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::Duration;
 
 use crate::{Algorithm, Decision, Error, Quota, Stats, TokenBucket};
 
@@ -156,12 +157,59 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
         K: Borrow<Q>,
         Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
     {
+        self.wait(key, cost, None)
+    }
+
+    /// Spends one unit for `key`, sleeping the thread at most `max_wait`.
+    /// See [`crate::Limiter::until_ready_within`].
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    pub fn until_ready_within<Q>(&self, key: &Q, max_wait: Duration) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        self.wait(key, 1, Some(max_wait))
+    }
+
+    /// Spends `cost` units for `key`, sleeping the thread at most
+    /// `max_wait`. See [`crate::Limiter::until_ready_within`].
+    ///
+    /// # Errors
+    ///
+    /// Only if the store fails, which the memory store never does.
+    pub fn until_ready_n_within<Q>(
+        &self,
+        key: &Q,
+        cost: u32,
+        max_wait: Duration,
+    ) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        self.wait(key, cost, Some(max_wait))
+    }
+
+    fn wait<Q>(&self, key: &Q, cost: u32, max_wait: Option<Duration>) -> Result<Decision, Error>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ToOwned<Owned = K> + ?Sized,
+    {
+        let start = std::time::Instant::now();
         loop {
             match self.hit_n(key, cost)? {
-                Decision::Denied(denial) => match denial.retry_after() {
-                    Some(wait) => thread::sleep(wait),
-                    None => return Ok(Decision::Denied(denial)),
-                },
+                Decision::Denied(denial) => {
+                    let Some(wait) = denial.retry_after() else {
+                        return Ok(Decision::Denied(denial));
+                    };
+                    if max_wait.is_some_and(|max| start.elapsed().saturating_add(wait) > max) {
+                        return Ok(Decision::Denied(denial));
+                    }
+                    thread::sleep(wait);
+                }
                 allowed @ Decision::Allowed(_) => return Ok(allowed),
             }
         }

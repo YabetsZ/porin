@@ -345,3 +345,33 @@ fn a_dropped_wait_spends_nothing() {
     assert_eq!(stats.remaining(), 0);
     assert!(stats.reset_after() > Duration::from_secs(59));
 }
+
+#[test]
+fn a_bounded_wait_gives_up_at_once_and_spends_nothing() {
+    use std::time::Instant;
+
+    let limiter: Limiter<u64> = Limiter::memory(quota!("1/minute"));
+    assert!(allowed(block_on(limiter.hit(&1))));
+    let start = Instant::now();
+    let decision = block_on(limiter.until_ready_within(&1, Duration::from_secs(1))).unwrap();
+    let Decision::Denied(denial) = decision else {
+        panic!("a minute away is past a one-second wait");
+    };
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "it doesn't wait first"
+    );
+    assert!(denial.retry_after().unwrap() > Duration::from_secs(59));
+    // A cost that never fits is denied at once too.
+    let never = block_on(limiter.until_ready_n_within(&2, 2, Duration::from_secs(3600))).unwrap();
+    assert!(!never.is_allowed());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "real-time waits are too slow under Miri")]
+fn a_bounded_wait_waits_when_the_unit_comes_in_time() {
+    let limiter: Limiter<u64> = Limiter::memory(quota!("100/second"));
+    assert!(allowed(block_on(limiter.hit_n(&1, 100))));
+    let decision = block_on(limiter.until_ready_within(&1, Duration::from_secs(1))).unwrap();
+    assert!(decision.is_allowed(), "the next unit comes in 10 ms");
+}
