@@ -27,7 +27,7 @@ use self::deny_cache::DenyCache;
 use self::event::Event;
 use self::fallback::Fallback;
 use self::scripts::Scripted;
-use super::{FailurePolicy, Policy, sealed};
+use super::{Policy, RedisFailurePolicy, sealed};
 use crate::algorithm::{Outcome, Retry, Spec, Stats, Unit};
 use crate::limiter::{Decision, Error};
 use crate::{Clock, MonotonicClock, Quota, Rate};
@@ -321,7 +321,7 @@ impl<T> RedisStoreBuilder<NoPolicy, T> {
 impl<P, T> RedisStoreBuilder<P, T> {
     /// What limiters answer when Redis fails or doesn't answer in time.
     /// Required, because each choice is wrong for some service.
-    pub fn on_failure<F: FailurePolicy>(self, policy: F) -> RedisStoreBuilder<F, T> {
+    pub fn on_failure<F: RedisFailurePolicy>(self, policy: F) -> RedisStoreBuilder<F, T> {
         RedisStoreBuilder {
             target: self.target,
             timeout: self.timeout,
@@ -431,7 +431,7 @@ impl<P, T> RedisStoreBuilder<P, T> {
     }
 }
 
-impl<P: FailurePolicy, T> RedisStoreBuilder<P, T> {
+impl<P: RedisFailurePolicy, T> RedisStoreBuilder<P, T> {
     fn settings(self) -> (T, Settings) {
         let settings = Settings {
             policy: self.policy.policy(),
@@ -464,7 +464,7 @@ impl<P> RedisStoreBuilder<P, ViaSentinel> {
     }
 }
 
-impl<P: FailurePolicy> RedisStoreBuilder<P> {
+impl<P: RedisFailurePolicy> RedisStoreBuilder<P> {
     /// Connects, and checks that Redis takes porin's writes: it loads the
     /// scripts and, on a single server, records a hit on the key
     /// `porin:v1:{connect}:0`, which expires within a second. A Cluster
@@ -488,7 +488,7 @@ impl<P: FailurePolicy> RedisStoreBuilder<P> {
     }
 }
 
-impl<P: FailurePolicy> RedisStoreBuilder<P, ViaSentinel> {
+impl<P: RedisFailurePolicy> RedisStoreBuilder<P, ViaSentinel> {
     /// Asks the Sentinels for the primary, connects to it, and checks that
     /// it answers.
     ///
@@ -681,7 +681,7 @@ impl<P> RedisStore<P> {
     }
 }
 
-impl<P: FailurePolicy> RedisStore<P> {
+impl<P: RedisFailurePolicy> RedisStore<P> {
     /// Runs `A`'s script for the key whose rates live at `keys`, through
     /// the circuit breaker and the timeout, answering by `P` on failure.
     pub(crate) async fn decide<A: Scripted>(
@@ -1003,12 +1003,12 @@ impl fmt::Debug for ViaSentinel {
     }
 }
 
-impl<P: FailurePolicy> sealed::Store for RedisStore<P> {
+impl<P: RedisFailurePolicy> sealed::Store for RedisStore<P> {
     type Inner<K, A: crate::Algorithm> = crate::limiter::redis::RedisInner<K, A, P>;
     type Config = crate::limiter::redis::RedisConfig<P>;
 }
 
-impl<P: FailurePolicy> super::Store for RedisStore<P> {}
+impl<P: RedisFailurePolicy> super::Store for RedisStore<P> {}
 
 /// What a script answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

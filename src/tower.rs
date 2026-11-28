@@ -104,7 +104,7 @@ impl<K, A, P> Limits<K> for Limiter<K, A, crate::store::RedisStore<P>>
 where
     K: crate::KeyEncode + Send + Sync + 'static,
     A: Algorithm,
-    P: crate::store::FailurePolicy,
+    P: crate::store::RedisFailurePolicy,
 {
     fn hit_key(&self, key: &K) -> impl Future<Output = Result<Decision, Error>> + Send {
         self.hit(key)

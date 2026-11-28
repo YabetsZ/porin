@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::{Builder, Decision, Error, Limiter, NoQuota, Stats};
 use crate::key::KeyEncode;
 use crate::quota::{QuotaError, QuotaErrorKind};
-use crate::store::FailurePolicy;
+use crate::store::RedisFailurePolicy;
 use crate::store::redis::scripts::Scripted;
 use crate::store::redis::{MAX_KEY_BYTES, RedisStore, key_names, prefix, suffix};
 use crate::{Algorithm, Quota, TokenBucket};
@@ -62,7 +62,7 @@ impl<K: KeyEncode> Limiter<K> {
     /// # }
     /// ```
     #[cfg_attr(docsrs, doc(cfg(any(feature = "redis-tokio", feature = "redis-smol"))))]
-    pub fn redis_builder<P: FailurePolicy>(
+    pub fn redis_builder<P: RedisFailurePolicy>(
         store: &RedisStore<P>,
         id: &str,
     ) -> Builder<K, TokenBucket, NoQuota, RedisStore<P>> {
@@ -78,7 +78,7 @@ impl<K: KeyEncode> Limiter<K> {
     }
 }
 
-impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Builder<K, A, Quota, RedisStore<P>> {
+impl<K: KeyEncode, A: Algorithm, P: RedisFailurePolicy> Builder<K, A, Quota, RedisStore<P>> {
     /// Builds the limiter.
     ///
     /// # Errors
@@ -109,7 +109,7 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Builder<K, A, Quota, RedisSto
     }
 }
 
-impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> {
+impl<K: KeyEncode, A: Algorithm, P: RedisFailurePolicy> Limiter<K, A, RedisStore<P>> {
     /// Spends one unit for `key`, if its quota allows.
     ///
     /// `Q` must encode like `K`, as `str` does for `String`.
@@ -335,7 +335,7 @@ impl<K, A: Algorithm, P> fmt::Debug for RedisInner<K, A, P> {
     }
 }
 
-impl<K, A: Algorithm, P: FailurePolicy> fmt::Debug for Limiter<K, A, RedisStore<P>> {
+impl<K, A: Algorithm, P: RedisFailurePolicy> fmt::Debug for Limiter<K, A, RedisStore<P>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = &*self.inner;
         f.debug_struct("Limiter")

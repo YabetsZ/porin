@@ -126,7 +126,7 @@ impl crate::store::sealed::FailurePolicy for FailOver {
         crate::store::Policy::FailOver(self)
     }
 }
-impl crate::store::FailurePolicy for FailOver {}
+impl crate::store::RedisFailurePolicy for FailOver {}
 
 /// The fallback limiters of one store, one per algorithm, keyed by each
 /// limiter key's first Redis key name, which names the limiter, the key,

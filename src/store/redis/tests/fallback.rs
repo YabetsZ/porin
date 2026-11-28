@@ -26,7 +26,7 @@ async fn store(server: &Server, policy: FailOver) -> RedisStore<FailOver> {
         .unwrap()
 }
 
-fn limiter<P: crate::store::FailurePolicy>(
+fn limiter<P: crate::store::RedisFailurePolicy>(
     redis: &RedisStore<P>,
     id: &str,
     quota: Quota,

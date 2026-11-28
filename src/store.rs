@@ -51,10 +51,24 @@ impl sealed::Store for Memory {
 impl Store for Memory {}
 
 /// What a remote store's limiter answers when the store fails or doesn't
-/// answer in time: [`FailOpen`], [`FailClosed`], [`Propagate`] or, for
-/// Redis, `FailOver`. There is no default, because each is wrong for some
-/// service. Sealed.
+/// answer in time: [`FailOpen`], [`FailClosed`] or [`Propagate`]. There is
+/// no default, because each is wrong for some service. Sealed.
 pub trait FailurePolicy: sealed::FailurePolicy + Copy + Send + Sync + 'static {}
+
+/// The failure policies a [`RedisStore`] takes: every [`FailurePolicy`],
+/// and [`FailOver`], which only Redis supports. Sealed.
+///
+/// A store that takes any [`FailurePolicy`] can't be given `FailOver`:
+///
+/// ```compile_fail
+/// use std::num::NonZeroU32;
+///
+/// fn general<P: porin::store::FailurePolicy>(_policy: P) {}
+/// general(porin::store::FailOver::to_memory(NonZeroU32::MIN));
+/// ```
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "redis-tokio", feature = "redis-smol"))))]
+pub trait RedisFailurePolicy: sealed::FailurePolicy + Copy + Send + Sync + 'static {}
 
 /// Allow the hit when the store fails. The service stays up through a store
 /// outage, unprotected. The decision's stats are not
@@ -103,6 +117,12 @@ impl sealed::FailurePolicy for Propagate {
 impl FailurePolicy for FailOpen {}
 impl FailurePolicy for FailClosed {}
 impl FailurePolicy for Propagate {}
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+impl RedisFailurePolicy for FailOpen {}
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+impl RedisFailurePolicy for FailClosed {}
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+impl RedisFailurePolicy for Propagate {}
 
 /// What a store does with a new key when it has no room: every key it
 /// tracks is still active, and forgetting an active key resets its limit.

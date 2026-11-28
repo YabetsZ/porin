@@ -8,13 +8,15 @@ use ::redis::{ConnectionAddr, TlsMode};
 
 use super::super::tls_mode;
 use super::{Server, binary, free_port, server, spawn_server};
-use crate::store::{CircuitBreaker, FailClosed, FailOpen, FailurePolicy, Propagate, RedisStore};
+use crate::store::{
+    CircuitBreaker, FailClosed, FailOpen, Propagate, RedisFailurePolicy, RedisStore,
+};
 use crate::{
     Decision, Error, FixedWindow, KeyEncode, Limiter, QuotaErrorKind, Rate, SlidingLog,
     SlidingWindow, quota,
 };
 
-async fn store<P: FailurePolicy>(server: &Server, policy: P) -> RedisStore<P> {
+async fn store<P: RedisFailurePolicy>(server: &Server, policy: P) -> RedisStore<P> {
     RedisStore::builder(server.url.as_str())
         .on_failure(policy)
         .connect()
@@ -1142,7 +1144,7 @@ const HUNG_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Three hits on a frozen Redis, each answered by the policy once the
 /// timeout fires, then a fourth answered at once by the open breaker.
-async fn answers_a_hung_redis<P: FailurePolicy>(
+async fn answers_a_hung_redis<P: RedisFailurePolicy>(
     limiter: &Limiter<u64, crate::TokenBucket, RedisStore<P>>,
     by_policy: fn(&Result<Decision, Error>) -> bool,
 ) {
@@ -1177,7 +1179,7 @@ async fn answers_a_hung_redis<P: FailurePolicy>(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg_attr(miri, ignore = "needs a Redis server")]
 async fn a_hung_redis_is_answered_by_the_policy_after_the_timeout() {
-    async fn timed<P: FailurePolicy>(server: &Server, policy: P) -> RedisStore<P> {
+    async fn timed<P: RedisFailurePolicy>(server: &Server, policy: P) -> RedisStore<P> {
         RedisStore::builder(server.url.as_str())
             .on_failure(policy)
             .timeout(HUNG_TIMEOUT)

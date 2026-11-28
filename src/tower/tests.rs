@@ -466,11 +466,11 @@ mod redis {
 
     use super::{from, header, send};
     use crate::store::redis::tests::{free_port, spawn_server};
-    use crate::store::{FailClosed, FailOpen, FailurePolicy, Propagate, RedisStore};
+    use crate::store::{FailClosed, FailOpen, Propagate, RedisFailurePolicy, RedisStore};
     use crate::tower::{Header, PeerIp, RateLimitLayer};
     use crate::{Limiter, quota};
 
-    async fn store<P: FailurePolicy>(url: &str, policy: P) -> RedisStore<P> {
+    async fn store<P: RedisFailurePolicy>(url: &str, policy: P) -> RedisStore<P> {
         RedisStore::builder(url)
             .on_failure(policy)
             .connect()
