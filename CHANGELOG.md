@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-28
+
+The API of 0.1.0-alpha.3, unchanged, after a soak test: three servers sharing one Redis under simulated traffic, with Redis hung and then killed. No route admitted more than its quota outside the outages, and during them no more than the documented bounds.
+
+### Fixed
+
+- `SlidingWindow`'s docs said it never admits more than the count in any period. In a period that doesn't line up with its windows it can admit up to nearly twice the count, when the previous window's hits bunched at its end; the docs now say so, and a test pins the worst case.
+
 ## [0.1.0-alpha.3] - 2026-11-28
 
 The tower layer, and Redis fail-over. The API may still change before 0.1.0.
@@ -76,7 +84,8 @@ First release, to reserve the name. The in-memory limiter is usable; the API may
 - Feature `memory` (on by default) for the in-memory limiter; without it only quotas, clocks and keys remain.
 - `blocking::Limiter` (feature `blocking`) for code without an async runtime. It shares state with the async `Limiter` it converts from.
 
-[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/YabetsZ/porin/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.3...v0.1.0
 [0.1.0-alpha.3]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/YabetsZ/porin/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/YabetsZ/porin/releases/tag/v0.1.0-alpha.1

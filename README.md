@@ -2,7 +2,7 @@
 
 Rate limiting for Rust services: several algorithms, shared storage, any framework.
 
-> **Status:** early development. The in-memory and Redis limiters and the tower layer work; peer mode comes in v0.2.
+> **Status:** the in-memory and Redis limiters and the tower layer are ready to use; peer mode comes in v0.2. Until 1.0, minor versions may change the API, as listed in the [changelog](CHANGELOG.md).
 
 A porin is a protein that forms a channel through a cell membrane and controls what passes. This crate does the same for requests.
 

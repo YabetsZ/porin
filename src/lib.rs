@@ -8,8 +8,8 @@
 //! Named after porins, the proteins that form channels in a cell membrane and
 //! decide what passes through.
 //!
-//! Status: early development. The in-memory and Redis limiters and the
-//! tower layer work; peer mode comes in v0.2.
+//! Status: the in-memory and Redis limiters and the tower layer are ready
+//! to use; peer mode comes in v0.2.
 //!
 //! ```
 //! use porin::{Limiter, quota};

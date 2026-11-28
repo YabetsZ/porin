@@ -1090,7 +1090,7 @@ checksum = "7e9b9cf600136f5b976fbc5727d58c26e1ecab8ee23088d44ef1c7af793550ab"
 
 [[package]]
 name = "porin"
-version = "0.1.0-alpha.3"
+version = "0.1.0"
 dependencies = [
  "axum",
  "divan",
