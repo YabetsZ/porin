@@ -1061,3 +1061,64 @@ fn builders_never_show_a_password() {
     assert!(!shown.contains("-pw"), "{shown}");
     assert!(shown.contains("porin"), "names the primary: {shown}");
 }
+
+/// State the script can't read is an error under every algorithm and
+/// policy, never read as a fresh key, which would admit a full allowance.
+async fn unreadable_state_is_an_error<A: crate::Algorithm + Default>() {
+    let Some(server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let open = store(&server, FailOpen).await;
+    let quota = quota!("1/hour");
+    let limiter: Limiter<u64, A, _> = Limiter::redis_builder(&open, "corrupt")
+        .algorithm(A::default())
+        .quota(quota)
+        .build()
+        .unwrap();
+    let [name] = super::super::key_names(
+        &super::super::prefix("corrupt"),
+        &1_u64.key_bytes(),
+        &super::super::suffix::<A>(&quota),
+        1,
+    )
+    .try_into()
+    .unwrap();
+    let mut admin = sync_connection(&server.url);
+    for garbage in ["garbage", "-5", "1e3", ""] {
+        ::redis::cmd("DEL").arg(&name).exec(&mut admin).unwrap();
+        ::redis::cmd("SET")
+            .arg(&name)
+            .arg(garbage)
+            .exec(&mut admin)
+            .unwrap();
+        assert!(
+            matches!(limiter.hit(&1).await, Err(Error::Store(_))),
+            "{garbage:?} under {A:?}",
+            A = A::default()
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn unreadable_token_bucket_state_is_an_error() {
+    unreadable_state_is_an_error::<crate::TokenBucket>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn unreadable_fixed_window_state_is_an_error() {
+    unreadable_state_is_an_error::<FixedWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn unreadable_sliding_window_state_is_an_error() {
+    unreadable_state_is_an_error::<SlidingWindow>().await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn unreadable_sliding_log_state_is_an_error() {
+    unreadable_state_is_an_error::<SlidingLog>().await;
+}

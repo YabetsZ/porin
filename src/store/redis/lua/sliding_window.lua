@@ -5,6 +5,7 @@ local U32_MAX = 4294967295
 local function decode(raw)
   if not raw then return { start = 0, previous = 0, current = 0 } end
   local start, previous, current = string.match(raw, "^(%d+):(%d+):(%d+)$")
+  if not start then error("porin: unreadable sliding window state") end
   return { start = tonumber(start), previous = tonumber(previous), current = tonumber(current) }
 end
 

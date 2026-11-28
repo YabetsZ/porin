@@ -3,6 +3,7 @@
 local function decode(raw)
   if not raw then return { start = 0, used = 0 } end
   local start, used = string.match(raw, "^(%d+):(%d+)$")
+  if not start then error("porin: unreadable fixed window state") end
   return { start = tonumber(start), used = tonumber(used) }
 end
 

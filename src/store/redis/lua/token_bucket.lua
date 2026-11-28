@@ -3,7 +3,11 @@
 -- is 2^51 us or more, so every value here stays exact.
 
 local function decode(raw)
-  return { tat = tonumber(raw) or 0 }
+  if not raw then return { tat = 0 } end
+  -- Anything but the digits this script writes is an error: read as a
+  -- fresh key, it would admit a full allowance.
+  if not string.match(raw, "^%d+$") then error("porin: unreadable token bucket state") end
+  return { tat = tonumber(raw) }
 end
 
 local function encode(state)
