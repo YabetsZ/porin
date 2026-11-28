@@ -664,3 +664,29 @@ async fn peer_ip_reads_tonics_connect_info() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+#[tokio::test]
+async fn exempt_requests_pass_unlimited_without_a_key() {
+    let limiter: Limiter<IpAddr> = Limiter::memory(quota!("1/minute"));
+    let layer = RateLimitLayer::new(limiter, PeerIp::new())
+        .exempt(|request| request.uri().path() == "/health");
+    let health = || Request::get("/health").body(()).unwrap();
+    for _ in 0..5 {
+        let response = send(&layer, health()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "no key needed, never limited"
+        );
+        assert_eq!(header(&response, "ratelimit"), None);
+    }
+    assert_eq!(
+        send(&layer, from("10.0.0.1:1")).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&layer, from("10.0.0.1:1")).await.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "other paths are still limited"
+    );
+}

@@ -473,8 +473,12 @@ pub struct RateLimitLayer<L, X: KeyExtractor> {
     config: Arc<Config<X::Key>>,
 }
 
+/// A predicate picking requests to let through unlimited.
+type Exempt = dyn Fn(Head<'_>) -> bool + Send + Sync;
+
 #[derive(Clone)]
 struct Config<K> {
+    exempt: Option<Arc<Exempt>>,
     protocol: Protocol,
     headers: Headers,
     full_store: FullStore,
@@ -538,6 +542,7 @@ where
             limiter,
             extractor,
             config: Arc::new(Config {
+                exempt: None,
                 protocol: Protocol::Http,
                 headers: Headers::Draft,
                 full_store: FullStore::TooManyRequests,
@@ -559,6 +564,28 @@ where
     #[must_use]
     pub fn headers(mut self, headers: Headers) -> Self {
         self.config_mut().headers = headers;
+        self
+    }
+
+    /// Lets requests `predicate` picks through without limiting them or
+    /// adding headers: health checks, internal callers, an allow list.
+    /// Checked before the key, so an exempt request needs none.
+    ///
+    /// ```
+    /// use porin::tower::{PeerIp, RateLimitLayer};
+    /// use porin::{Limiter, quota};
+    ///
+    /// let limiter: Limiter<std::net::IpAddr> = Limiter::memory(quota!("10/second"));
+    /// let layer = RateLimitLayer::new(limiter, PeerIp::new())
+    ///     .exempt(|request| request.uri().path() == "/health");
+    /// # drop(layer);
+    /// ```
+    #[must_use]
+    pub fn exempt<F>(mut self, predicate: F) -> Self
+    where
+        F: Fn(Head<'_>) -> bool + Send + Sync + 'static,
+    {
+        self.config_mut().exempt = Some(Arc::new(predicate));
         self
     }
 
@@ -695,6 +722,16 @@ where
     }
 
     fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
+        let exempt = self
+            .config
+            .exempt
+            .as_ref()
+            .is_some_and(|exempt| exempt(Head::new(&request)));
+        if exempt {
+            let fresh = self.inner.clone();
+            let mut inner = std::mem::replace(&mut self.inner, fresh);
+            return Box::pin(async move { inner.call(request).await });
+        }
         let key = self
             .extractor
             .extract(Head::new(&request))

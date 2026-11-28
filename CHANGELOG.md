@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RateLimitLayer::exempt`: let requests a predicate picks through unlimited, such as health checks, without needing a key.
 - `KeyEncode` for `()`, for one limit shared by every instance, such as a `Limiter<(), _, RedisStore<_>>` in front of an outside API.
 - `until_ready_within` and `until_ready_n_within`, on every limiter: wait at most a given time, and return the denial at once, spending nothing, when the units can't come in time.
 - `porin::tower` (feature `tower`): `RateLimitLayer`, a tower layer for axum, tonic and hyper, over a memory or Redis limiter. Requests are keyed by `PeerIp` (the TCP peer, or with `trusting_proxies` the one `ProxyHeader` the proxies write; IPv6 grouped by /64), `Header` (one value of at most 512 bytes) or `from_fn`. Limited requests get 429 with `Retry-After`; an unavailable or failing store 503; a missing or too long key 400, or a `fallback_key`. Responses carry the IETF draft `RateLimit-Policy` and `RateLimit` headers, or `X-RateLimit-*` with `Headers::Legacy`. A full store answers 429, or 503 with `FullStore::ServiceUnavailable`.
