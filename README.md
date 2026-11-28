@@ -41,7 +41,7 @@ let limiter: Limiter<u64, _, _> = Limiter::redis_builder(&redis, "api")
     .build()?;
 ```
 
-- **tower** (feature `tower`, `axum` for axum's connection info): a layer for axum, tonic and hyper. It keys requests by client IP (IPv6 by /64, proxies only when trusted), a header or a function, answers 429 with `Retry-After`, and adds `RateLimit-Policy` and `RateLimit` headers
+- **tower** (feature `tower`; `axum_0_8` and `tonic_0_14` read those servers' client addresses): a layer for axum, tonic and hyper. It keys requests by client IP (IPv6 by /64, proxies only when trusted), a header or a function, answers 429 with `Retry-After`, and adds `RateLimit-Policy` and `RateLimit` headers
 
 ```rust
 use porin::tower::{PeerIp, RateLimitLayer};

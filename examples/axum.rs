@@ -2,7 +2,7 @@
 //! 100 a day.
 //!
 //! ```sh
-//! cargo run --example axum --features axum
+//! cargo run --example axum --features axum_0_8
 //! for i in $(seq 7); do curl -si localhost:3000 | head -1; done
 //! ```
 

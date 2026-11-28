@@ -507,6 +507,14 @@ mod redis {
         assert_eq!(healthy.status(), StatusCode::OK);
         assert_eq!(header(&healthy, "ratelimit"), Some("\"1s\";r=9;t=1"));
 
+        let grpc = RateLimitLayer::new(
+            Limiter::redis_builder(&store(&server.url, FailClosed).await, "g")
+                .quota(quota)
+                .build()
+                .unwrap(),
+            PeerIp::new(),
+        )
+        .protocol(crate::tower::Protocol::Grpc);
         server.stop();
         for layer_answer in [
             send(&closed, from("10.0.0.1:1")).await,
@@ -516,6 +524,13 @@ mod redis {
             assert!(header(&layer_answer, "retry-after").is_some());
             assert_eq!(header(&layer_answer, "ratelimit"), None);
         }
+        let grpc_answer = send(&grpc, from("10.0.0.1:1")).await;
+        assert_eq!(
+            header(&grpc_answer, "grpc-status"),
+            Some("14"),
+            "UNAVAILABLE"
+        );
+        assert!(header(&grpc_answer, "grpc-retry-pushback-ms").is_some());
         let through = send(&open, from("10.0.0.1:1")).await;
         assert_eq!(
             through.status(),
@@ -553,7 +568,7 @@ mod redis {
     }
 }
 
-#[cfg(feature = "axum")]
+#[cfg(feature = "axum_0_8")]
 #[tokio::test]
 async fn an_axum_router_keys_by_connect_info() {
     use axum::Router;
@@ -572,4 +587,80 @@ async fn an_axum_router_keys_by_connect_info() {
     assert!(first.headers().contains_key("ratelimit"));
     let second = app.oneshot(get()).await.unwrap();
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn grpc_services_get_grpc_statuses() {
+    use super::Protocol;
+
+    let limiter: Limiter<IpAddr> = Limiter::memory(quota!("1/minute"));
+    let layer = RateLimitLayer::new(limiter, PeerIp::new()).protocol(Protocol::Grpc);
+    assert_eq!(
+        send(&layer, from("10.0.0.1:1")).await.status(),
+        StatusCode::OK
+    );
+    let refused = send(&layer, from("10.0.0.1:1")).await;
+    assert_eq!(
+        refused.status(),
+        StatusCode::OK,
+        "gRPC carries its status in headers"
+    );
+    assert_eq!(header(&refused, "content-type"), Some("application/grpc"));
+    assert_eq!(header(&refused, "grpc-status"), Some("8"));
+    assert_eq!(header(&refused, "grpc-retry-pushback-ms"), Some("60000"));
+    assert_eq!(header(&refused, "retry-after"), None);
+    assert!(header(&refused, "ratelimit").is_some());
+
+    let keyless = send(&layer, Request::new(())).await;
+    assert_eq!(header(&keyless, "grpc-status"), Some("3"));
+}
+
+#[cfg(feature = "tonic_0_14")]
+#[tokio::test]
+async fn tonic_reads_the_answers_as_grpc_statuses() {
+    use super::Protocol;
+
+    let limiter: Limiter<IpAddr> = Limiter::builder()
+        .quota(quota!("1/minute"))
+        .max_keys(NonZeroUsize::MIN)
+        .build();
+    let layer = RateLimitLayer::new(limiter, PeerIp::new())
+        .protocol(Protocol::Grpc)
+        .when_store_full(FullStore::ServiceUnavailable);
+    let status_of = |response: &Response<String>| {
+        tonic::Status::from_header_map(response.headers()).expect("a gRPC status")
+    };
+    assert_eq!(
+        send(&layer, from("10.0.0.1:1")).await.status(),
+        StatusCode::OK
+    );
+    let refused = send(&layer, from("10.0.0.1:1")).await;
+    assert_eq!(status_of(&refused).code(), tonic::Code::ResourceExhausted);
+    assert_eq!(status_of(&refused).message(), "rate limited");
+    let full = send(&layer, from("10.0.0.2:1")).await;
+    assert_eq!(status_of(&full).code(), tonic::Code::Unavailable);
+    let keyless = send(&layer, Request::new(())).await;
+    assert_eq!(status_of(&keyless).code(), tonic::Code::InvalidArgument);
+}
+
+#[cfg(feature = "tonic_0_14")]
+#[tokio::test]
+async fn peer_ip_reads_tonics_connect_info() {
+    use tonic::transport::server::TcpConnectInfo;
+
+    let limiter: Limiter<IpAddr> = Limiter::memory(quota!("1/minute"));
+    let layer = RateLimitLayer::new(limiter, PeerIp::new());
+    let with_info = || {
+        let mut request = Request::new(());
+        request.extensions_mut().insert(TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(SocketAddr::from(([10, 2, 2, 2], 5000))),
+        });
+        request
+    };
+    assert_eq!(send(&layer, with_info()).await.status(), StatusCode::OK);
+    assert_eq!(
+        send(&layer, with_info()).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
 }

@@ -18,11 +18,13 @@ redis-tokio = ["memory", "dep:redis", "redis/tokio-comp"]
 redis-smol = ["memory", "dep:redis", "redis/smol-comp"]
 quanta = ["dep:quanta"]
 tower = ["memory", "dep:http", "dep:tower-layer", "dep:tower-service"]
-axum = ["tower", "dep:axum"]
+axum_0_8 = ["tower", "dep:axum"]
+tonic_0_14 = ["tower", "dep:tonic"]
 
 [dependencies]
 axum = { version = "0.8.9", optional = true, default-features = false, features = ["tokio"] }
 futures-timer = { version = "3.0.4", optional = true }
+tonic = { version = "0.14.5", optional = true, default-features = false, features = ["server"] }
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"], optional = true }
 http = { version = "1.4.0", optional = true }
 quanta = { version = "0.12.6", optional = true }
@@ -73,7 +75,7 @@ tower = { version = "0.5.3", features = ["util"] }
 
 [[example]]
 name = "axum"
-required-features = ["axum"]
+required-features = ["axum_0_8"]
 
 [[bench]]
 name = "memory"

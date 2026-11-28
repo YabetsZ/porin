@@ -28,10 +28,10 @@
 //! its burst and the time to refill it, since that is what it allows at
 //! once.
 //!
-//! The answers are plain HTTP, with empty bodies. gRPC clients see them
-//! as `UNAVAILABLE`, which many retry at once, rather than
-//! `RESOURCE_EXHAUSTED`; behind tonic, consider mapping them in an outer
-//! layer.
+//! For gRPC services, [`Protocol::Grpc`] answers with gRPC statuses
+//! instead: `RESOURCE_EXHAUSTED` for a limited request, `UNAVAILABLE` when
+//! the store can't decide. Plain HTTP statuses would reach gRPC clients as
+//! `UNAVAILABLE`, which many retry at once.
 //!
 //! # Examples
 //!
@@ -180,11 +180,10 @@ impl<'a> Head<'a> {
 /// through it.
 ///
 /// By default the IP is the TCP peer's, read from the request extensions:
-/// a [`SocketAddr`], or with feature `axum`, axum 0.8's
-/// `ConnectInfo<SocketAddr>` (or `MockConnectInfo`, as in axum's tests).
-/// tonic puts a `TcpConnectInfo` there instead; key by it with
-/// [`from_fn`]. A server that puts nothing there leaves every request
-/// without a key.
+/// a [`SocketAddr`]; with feature `axum_0_8`, axum's
+/// `ConnectInfo<SocketAddr>` (or `MockConnectInfo`, as in axum's tests);
+/// with feature `tonic_0_14`, tonic's `TcpConnectInfo`. A server that puts
+/// none of these there leaves every request without a key.
 ///
 /// Behind proxies or a load balancer, the peer is the last proxy;
 /// [`trusting_proxies`](Self::trusting_proxies) reads the client from the
@@ -248,7 +247,7 @@ impl KeyExtractor for PeerIp {
 }
 
 fn peer_address(extensions: &Extensions) -> Option<SocketAddr> {
-    #[cfg(feature = "axum")]
+    #[cfg(feature = "axum_0_8")]
     {
         use axum::extract::ConnectInfo;
         use axum::extract::connect_info::MockConnectInfo;
@@ -259,6 +258,12 @@ fn peer_address(extensions: &Extensions) -> Option<SocketAddr> {
         }
         if let Some(MockConnectInfo(address)) = extensions.get::<MockConnectInfo<SocketAddr>>() {
             return Some(*address);
+        }
+    }
+    #[cfg(feature = "tonic_0_14")]
+    if let Some(info) = extensions.get::<tonic::transport::server::TcpConnectInfo>() {
+        if let Some(address) = info.remote_addr() {
+            return Some(address);
         }
     }
     extensions.get::<SocketAddr>().copied()
@@ -435,6 +440,21 @@ pub enum Headers {
     Both,
 }
 
+/// How the layer answers the requests it refuses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Protocol {
+    /// HTTP statuses: 429, 503 and 400, with `Retry-After`.
+    #[default]
+    Http,
+    /// gRPC statuses in a trailers-only response: `RESOURCE_EXHAUSTED` (8)
+    /// for a limited request, `UNAVAILABLE` (14) when the store can't
+    /// decide, `INVALID_ARGUMENT` (3) without a key, with
+    /// `grpc-retry-pushback-ms`, which gRPC retry policies honour, in
+    /// place of `Retry-After`.
+    Grpc,
+}
+
 /// What a request refused because the store is full of other keys gets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -455,6 +475,7 @@ pub struct RateLimitLayer<L, X: KeyExtractor> {
 
 #[derive(Clone)]
 struct Config<K> {
+    protocol: Protocol,
     headers: Headers,
     full_store: FullStore,
     fallback: Option<K>,
@@ -517,6 +538,7 @@ where
             limiter,
             extractor,
             config: Arc::new(Config {
+                protocol: Protocol::Http,
                 headers: Headers::Draft,
                 full_store: FullStore::TooManyRequests,
                 fallback: None,
@@ -537,6 +559,14 @@ where
     #[must_use]
     pub fn headers(mut self, headers: Headers) -> Self {
         self.config_mut().headers = headers;
+        self
+    }
+
+    /// How refusals are answered. The default is [`Protocol::Http`]; for
+    /// gRPC services, [`Protocol::Grpc`].
+    #[must_use]
+    pub fn protocol(mut self, protocol: Protocol) -> Self {
+        self.config_mut().protocol = protocol;
         self
     }
 
@@ -677,7 +707,7 @@ where
         let config = Arc::clone(&self.config);
         Box::pin(async move {
             let Some(key) = key else {
-                return Ok(answer(StatusCode::BAD_REQUEST, None));
+                return Ok(config.answer(Refusal::BadKey, None));
             };
             match limiter.hit_key(key.borrow()).await {
                 Ok(Decision::Allowed(stats)) => {
@@ -686,42 +716,92 @@ where
                     Ok(response)
                 }
                 Ok(Decision::Denied(denial)) => Ok(config.refuse(denial)),
-                Err(Error::KeyTooLong) => Ok(answer(StatusCode::BAD_REQUEST, None)),
+                Err(Error::KeyTooLong) => Ok(config.answer(Refusal::BadKey, None)),
                 // Nothing says when the store will be back: try in a second.
-                Err(Error::Store(_)) => Ok(answer(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Some(Duration::from_secs(1)),
-                )),
+                Err(Error::Store(_)) => {
+                    Ok(config.answer(Refusal::Unavailable, Some(Duration::from_secs(1))))
+                }
             }
         })
     }
 }
 
-/// An empty response with `status` and, if given, `Retry-After`.
-fn answer<B: Default>(status: StatusCode, retry_after: Option<Duration>) -> Response<B> {
-    let mut response = Response::new(B::default());
-    *response.status_mut() = status;
-    if let Some(wait) = retry_after {
-        response
-            .headers_mut()
-            .insert(RETRY_AFTER, HeaderValue::from(seconds(wait).max(1)));
-    }
-    response
+/// Why the layer answered a request itself.
+#[derive(Clone, Copy)]
+enum Refusal {
+    /// Over the limit, or the store is full and answers as if.
+    Limited,
+    /// The store can't decide.
+    Unavailable,
+    /// No key, or one too long.
+    BadKey,
 }
 
 impl<K> Config<K> {
+    /// An empty response for `refusal`, telling the client when to retry.
+    fn answer<B: Default>(&self, refusal: Refusal, retry_after: Option<Duration>) -> Response<B> {
+        let mut response = Response::new(B::default());
+        match self.protocol {
+            Protocol::Http => {
+                *response.status_mut() = match refusal {
+                    Refusal::Limited => StatusCode::TOO_MANY_REQUESTS,
+                    Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                    Refusal::BadKey => StatusCode::BAD_REQUEST,
+                };
+                if let Some(wait) = retry_after {
+                    response
+                        .headers_mut()
+                        .insert(RETRY_AFTER, HeaderValue::from(seconds(wait).max(1)));
+                }
+            }
+            Protocol::Grpc => {
+                let headers = response.headers_mut();
+                // A trailers-only response: HTTP 200, the status in the
+                // headers, no messages.
+                let (code, message) = match refusal {
+                    Refusal::Limited => ("8", "rate limited"),
+                    Refusal::Unavailable => ("14", "rate limit store unavailable"),
+                    Refusal::BadKey => ("3", "no rate limit key"),
+                };
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/grpc"),
+                );
+                headers.insert(
+                    HeaderName::from_static("grpc-status"),
+                    HeaderValue::from_static(code),
+                );
+                headers.insert(
+                    HeaderName::from_static("grpc-message"),
+                    HeaderValue::from_static(message),
+                );
+                if let Some(wait) = retry_after {
+                    // gRPC retry policies wait this long before retrying,
+                    // so round up: earlier would be refused again.
+                    let millis =
+                        u64::try_from(wait.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX);
+                    headers.insert(
+                        HeaderName::from_static("grpc-retry-pushback-ms"),
+                        HeaderValue::from(millis),
+                    );
+                }
+            }
+        }
+        response
+    }
+
     fn refuse<B: Default>(&self, denial: Denial) -> Response<B> {
-        let status = if denial.is_store_unavailable() {
-            StatusCode::SERVICE_UNAVAILABLE
+        let refusal = if denial.is_store_unavailable() {
+            Refusal::Unavailable
         } else if denial.is_store_full() {
             match self.full_store {
-                FullStore::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
-                FullStore::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+                FullStore::TooManyRequests => Refusal::Limited,
+                FullStore::ServiceUnavailable => Refusal::Unavailable,
             }
         } else {
-            StatusCode::TOO_MANY_REQUESTS
+            Refusal::Limited
         };
-        let mut response = answer(status, denial.retry_after());
+        let mut response = self.answer(refusal, denial.retry_after());
         if !denial.is_store_full() {
             self.describe(response.headers_mut(), denial.stats());
         }
