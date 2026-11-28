@@ -14,7 +14,7 @@ use super::fixed_window::FixedWindow;
 use super::gcra::TokenBucket;
 use super::sliding_log::SlidingLog;
 use super::sliding_window::SlidingWindow;
-use super::{Algorithm, Check, Outcome, Retry, hit_quota};
+use super::{Algorithm, Check, Outcome, Retry, check_quota, hit_quota};
 use crate::Quota;
 use crate::quota::MAX_RATES;
 use crate::{Rate, Timestamp};
@@ -427,5 +427,100 @@ proptest! {
         idle_state_decides_like_a_new_one::<FixedWindow>(window, &before, &after)?;
         idle_state_decides_like_a_new_one::<SlidingWindow>(window, &before, &after)?;
         idle_state_decides_like_a_new_one::<SlidingLog>(window, &before, &after)?;
+    }
+}
+
+/// On every denial with a wait `d`, the same hit is still denied at any
+/// point before `d` (checked at 0, d/8 … 7d/8 and d − 1 ns) and allowed at
+/// exactly `d`, with nothing spent between. Every algorithm's wait is exact
+/// for each rate, and a quota waits for its slowest denying rate, so the
+/// wait is exact for the quota too. `Never` comes exactly when the cost is
+/// larger than the smallest of the rates' `capacity`.
+fn retry_is_never_early_nor_late<A: Algorithm>(
+    quota: &Quota,
+    capacity: fn(Rate) -> u32,
+    ops: &[(u64, u32)],
+) -> Result<(), TestCaseError> {
+    let smallest = quota.rates().iter().map(|rate| capacity(*rate)).min();
+    let mut states: [A::State; MAX_RATES] = std::array::from_fn(|_| A::State::default());
+    let mut now = 0;
+    let allowed_at = |states: &[A::State; MAX_RATES], at: u64, cost: u32| {
+        matches!(
+            check_quota::<A, MAX_RATES>(quota, states, Timestamp::from_nanos(at), cost).0,
+            Outcome::Allowed(_)
+        )
+    };
+    for &(advance, cost) in ops {
+        now += advance;
+        match hit_quota::<A, MAX_RATES>(quota, &mut states, Timestamp::from_nanos(now), cost) {
+            Outcome::Allowed(_) => {}
+            Outcome::Denied {
+                retry: Retry::Never,
+                ..
+            } => {
+                prop_assert!(Some(cost) > smallest, "Never for cost {} at {}", cost, now);
+            }
+            Outcome::Denied {
+                retry: Retry::After(wait),
+                ..
+            } => {
+                prop_assert!(
+                    Some(cost) <= smallest,
+                    "a wait for cost {} that never fits",
+                    cost
+                );
+                let wait = u64::try_from(wait.as_nanos()).unwrap();
+                prop_assert!(wait > 0, "a denial with no wait at {}", now);
+                for offset in (0..8).map(|eighths| wait * eighths / 8).chain([wait - 1]) {
+                    prop_assert!(
+                        !allowed_at(&states, now + offset, cost),
+                        "cost {} allowed {} ns into a wait of {} ns at {}",
+                        cost,
+                        offset,
+                        wait,
+                        now
+                    );
+                }
+                prop_assert!(
+                    allowed_at(&states, now + wait, cost),
+                    "cost {} still denied after its wait of {} ns at {}",
+                    cost,
+                    wait,
+                    now
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Up to [`MAX_RATES`] rates with any counts, periods and bursts.
+fn any_quota() -> impl Strategy<Value = Quota> {
+    prop::collection::vec(
+        (1..=8_u32, prop::sample::select(&PERIODS_MS[..]), 1..=10_u32),
+        1..=MAX_RATES,
+    )
+    .prop_map(|rates| {
+        let (count, period_ms, burst) = rates[0];
+        let mut quota = Quota::new(rate(count, period_ms, burst));
+        for &(count, period_ms, burst) in &rates[1..] {
+            if let Ok(with) = quota.with(rate(count, period_ms, burst)) {
+                quota = with;
+            }
+        }
+        quota
+    })
+}
+
+proptest! {
+    #[test]
+    #[cfg_attr(miri, ignore = "too slow under Miri")]
+    fn retry_after_is_never_early_nor_late(quota in any_quota(), ops in ops(1_000, 10)) {
+        let burst = |rate: Rate| rate.burst().get();
+        let count = |rate: Rate| rate.count().get();
+        retry_is_never_early_nor_late::<TokenBucket>(&quota, burst, &ops)?;
+        retry_is_never_early_nor_late::<FixedWindow>(&quota, count, &ops)?;
+        retry_is_never_early_nor_late::<SlidingWindow>(&quota, count, &ops)?;
+        retry_is_never_early_nor_late::<SlidingLog>(&quota, count, &ops)?;
     }
 }
