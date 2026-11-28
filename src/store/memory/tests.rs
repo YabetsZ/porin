@@ -481,3 +481,28 @@ fn a_timestamp_older_than_the_last_hit_never_evicts_an_active_key() {
         .count();
     assert_eq!(admitted, 1, "only the 500 ms unit has expired");
 }
+
+/// At `u64::MAX` ns a window's end or a log entry's expiry lies past what a
+/// `u64` holds, so the key's idle time saturates to `u64::MAX`. Taken as idle
+/// at `u64::MAX`, keys there evicted each other and every hit was allowed.
+fn keys_at_the_largest_timestamp_stay_active<A: Stored>() {
+    let quota = quota!("1/second");
+    let store = store::<A>(1, 1);
+    let end = Timestamp::from_nanos(u64::MAX);
+    let first = store.hit(&quota, &1, end, 1);
+    let second = store.hit(&quota, &2, end, 1);
+    let again = store.hit(&quota, &1, end, 1);
+    assert!(
+        !allowed(second) && !allowed(again),
+        "{}: {first:?}, then key 2 {second:?}, then key 1 {again:?}",
+        std::any::type_name::<A>()
+    );
+}
+
+#[test]
+fn keys_hit_at_the_largest_timestamp_are_never_evicted_as_idle() {
+    keys_at_the_largest_timestamp_stay_active::<TokenBucket>();
+    keys_at_the_largest_timestamp_stay_active::<FixedWindow>();
+    keys_at_the_largest_timestamp_stay_active::<SlidingWindow>();
+    keys_at_the_largest_timestamp_stay_active::<SlidingLog>();
+}

@@ -340,7 +340,9 @@ impl<K: Hash + Eq, S: Slot> Shard<K, S> {
             let Some(&Reverse((idle_at, hash))) = self.expiry.peek() else {
                 return false;
             };
-            if idle_at > until {
+            // An idle time of u64::MAX may be a later one saturated, so it
+            // never counts as idle, even with the clock at u64::MAX.
+            if idle_at > until || idle_at == u64::MAX {
                 return false;
             }
             self.expiry.pop();
@@ -352,7 +354,9 @@ impl<K: Hash + Eq, S: Slot> Shard<K, S> {
             // of the heap belongs to the entry nearest to idle.
             let evictable = |entry: &Entry<K, S>| {
                 let entry_idle = entry.slot.idle_at();
-                (entry_idle <= now || entry_idle <= idle_at) && has_hash(entry)
+                entry_idle < u64::MAX
+                    && (entry_idle <= now || entry_idle <= idle_at)
+                    && has_hash(entry)
             };
             if let Ok(victim) = self.entries.find_entry(hash, evictable) {
                 victim.remove();
