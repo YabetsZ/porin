@@ -8,8 +8,8 @@
 //! Named after porins, the proteins that form channels in a cell membrane and
 //! decide what passes through.
 //!
-//! Status: early development. The in-memory limiter works; Redis, the tower
-//! layer and peer mode are next.
+//! Status: early development. The in-memory and Redis limiters and the
+//! tower layer work; peer mode comes in v0.2.
 //!
 //! ```
 //! use porin::{Limiter, quota};
@@ -25,6 +25,17 @@
 //! # Ok::<(), porin::Error>(())
 //! # }).unwrap();
 //! ```
+//!
+//! # Features
+//!
+//! | Feature | Adds |
+//! |---|---|
+//! | `memory` (default) | [`Limiter::memory`] and the in-memory store |
+//! | `blocking` | `blocking::Limiter`, which waits by sleeping the thread |
+//! | `quanta` | `QuantaClock`, a faster clock from the `quanta` crate |
+//! | `redis-tokio`, `redis-smol` | the Redis store, on either runtime |
+//! | `tower` | `tower::RateLimitLayer`, for axum, tonic and hyper |
+//! | `axum_0_8`, `tonic_0_14` | client addresses from those servers' connection info |
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg_attr(

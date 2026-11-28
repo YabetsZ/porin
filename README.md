@@ -26,7 +26,7 @@ if limiter.hit(&user_id).await?.is_allowed() {
 - **Memory safety under floods:** at most 1,000,000 tracked keys by default; idle keys are evicted, and you choose what happens when every key is active (`WhenFull`)
 - **Waiting:** `until_ready`, on any async runtime, and a blocking `Limiter` for code without one
 - **Clocks:** the system clock by default, `CoarseClock` for the fastest hits, `QuantaClock` (feature `quanta`), and `ManualClock` for tests
-- **Redis** (features `redis-tokio`, `redis-smol`): one limit shared by every instance, on a single server, Sentinel or Cluster. Each decision is one atomic Lua script timed by Redis's clock, and you choose what happens when Redis is down: `FailOpen`, `FailClosed` or `Propagate`
+- **Redis** (features `redis-tokio`, `redis-smol`): one limit shared by every instance, on a single server, Sentinel or Cluster. Each decision is one atomic Lua script timed by Redis's clock, and you choose what happens when Redis is down: `FailOpen`, `FailClosed`, `Propagate`, or `FailOver` to a local limit. A circuit breaker stops calling a Redis that is failing, and an optional deny cache answers keys Redis has just denied without asking it again
 
 ```rust
 use porin::store::{FailClosed, RedisStore};
@@ -51,6 +51,20 @@ let app = Router::new()
     .route("/", get(handler))
     .layer(RateLimitLayer::new(limiter, PeerIp::new()));
 ```
+
+## Performance
+
+One `hit` on the memory store, on one core of an i7-13700H, from `cargo bench --bench compare --features memory,quanta`:
+
+| Clock | 1,000 keys | 100,000 keys |
+|---|---|---|
+| `CoarseClock` (1 ms) | 42 ns | 47 ns |
+| `QuantaClock` | 59 ns | 75 ns |
+| system clock | 70 ns | 86 ns |
+
+[governor](https://github.com/boinkor-net/governor) with its 1 ms upkeep clock takes 28 ns and 32 ns on the same machine.
+
+On Redis, a token bucket `hit` takes 22 µs at the median from one task over loopback, against 10 µs for a `PING`; 16 tasks sharing a store reach about 85,000 hits a second. `cargo bench --bench redis --features redis-tokio` measures your own setup.
 
 ## Planned
 
