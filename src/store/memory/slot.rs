@@ -138,7 +138,7 @@ impl<const N: usize> Slot for Atomic<N> {
         loop {
             match TokenBucket::check(rate, &GcraState::from_word(current), now, cost) {
                 Check::Allowed { stats, .. } if cost == 0 => {
-                    return Some(Outcome::Allowed(stats));
+                    return Some(Outcome::Allowed(stats.of_one_rate()));
                 }
                 Check::Allowed { commit, stats } => {
                     match tat.compare_exchange_weak(
@@ -147,12 +147,17 @@ impl<const N: usize> Slot for Atomic<N> {
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                     ) {
-                        Ok(_) => return Some(Outcome::Allowed(stats)),
+                        Ok(_) => return Some(Outcome::Allowed(stats.of_one_rate())),
                         // Another hit got in first: decide again on its result.
                         Err(actual) => current = actual,
                     }
                 }
-                Check::Denied { stats, retry } => return Some(Outcome::Denied { stats, retry }),
+                Check::Denied { stats, retry } => {
+                    return Some(Outcome::Denied {
+                        stats: stats.of_one_rate(),
+                        retry,
+                    });
+                }
             }
         }
     }

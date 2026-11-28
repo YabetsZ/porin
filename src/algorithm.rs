@@ -110,12 +110,18 @@ pub(crate) enum Check<C> {
 }
 
 /// What a key has left, for `RateLimit-*` headers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Stats {
     /// Units that can still be spent now, counting this hit if it was allowed.
     pub(crate) remaining: u32,
     /// Time until the key is back to its never-hit state, if nothing more is spent.
     pub(crate) reset_after: Duration,
+    /// For a quota, the rate closest to running out: the fewest units
+    /// left, then the longest reset, then the first. One rate's stats
+    /// leave it 0.
+    pub(crate) limiting: u8,
+    /// That rate's own reset time, for headers that describe one rate.
+    pub(crate) limiting_reset: Duration,
 }
 
 /// When a denied hit could succeed.
@@ -186,14 +192,16 @@ pub(crate) fn check_quota_in<A: Algorithm, const N: usize>(
     let mut commits: [Option<A::Commit>; N] = std::array::from_fn(|_| None);
     let mut summary = Stats::UNLIMITED;
     let mut retry = None;
-    for ((rate, state), slot) in rates.iter().zip(states.iter()).zip(commits.iter_mut()) {
+    for (index, ((rate, state), slot)) in
+        (0_u8..).zip(rates.iter().zip(states.iter()).zip(commits.iter_mut()))
+    {
         match A::check_ticks(Spec::new(*rate, unit), state, now, cost) {
             Check::Allowed {
                 commit,
                 stats: rate_stats,
             } => {
                 *slot = Some(commit);
-                summary = summary.tightest(rate_stats);
+                summary = summary.tightest(index, rate_stats);
             }
             Check::Denied {
                 retry: rate_retry, ..
@@ -208,13 +216,12 @@ pub(crate) fn check_quota_in<A: Algorithm, const N: usize>(
     };
     // Allowed rates reported stats as if the hit were recorded. It isn't,
     // so report what every rate has without it.
-    let unchanged =
-        rates
-            .iter()
-            .zip(states.iter())
-            .fold(Stats::UNLIMITED, |summary, (rate, state)| {
-                summary.tightest(peek_stats::<A>(Spec::new(*rate, unit), state, now))
-            });
+    let unchanged = (0_u8..).zip(rates.iter().zip(states.iter())).fold(
+        Stats::UNLIMITED,
+        |summary, (index, (rate, state))| {
+            summary.tightest(index, peek_stats::<A>(Spec::new(*rate, unit), state, now))
+        },
+    );
     let denied = Outcome::Denied {
         stats: unchanged,
         retry,
@@ -233,12 +240,40 @@ impl Stats {
     const UNLIMITED: Self = Self {
         remaining: u32::MAX,
         reset_after: Duration::ZERO,
+        limiting: 0,
+        limiting_reset: Duration::ZERO,
     };
 
-    fn tightest(self, other: Self) -> Self {
+    /// One rate's stats.
+    #[cfg(test)]
+    pub(crate) fn new(remaining: u32, reset_after: Duration) -> Self {
         Self {
-            remaining: self.remaining.min(other.remaining),
-            reset_after: self.reset_after.max(other.reset_after),
+            remaining,
+            reset_after,
+            ..Self::default()
+        }
+    }
+
+    /// A one-rate quota's summary of that rate's stats, as
+    /// [`check_quota`] would report it.
+    pub(crate) fn of_one_rate(self) -> Self {
+        Self::UNLIMITED.tightest(0, self)
+    }
+
+    /// The summary with rate `index`'s stats folded in.
+    fn tightest(self, index: u8, rate: Self) -> Self {
+        let closer = rate.remaining < self.remaining
+            || (rate.remaining == self.remaining && rate.reset_after > self.limiting_reset);
+        let (limiting, limiting_reset) = if closer {
+            (index, rate.reset_after)
+        } else {
+            (self.limiting, self.limiting_reset)
+        };
+        Self {
+            remaining: self.remaining.min(rate.remaining),
+            reset_after: self.reset_after.max(rate.reset_after),
+            limiting,
+            limiting_reset,
         }
     }
 }

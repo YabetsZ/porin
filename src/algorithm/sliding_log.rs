@@ -68,6 +68,7 @@ impl Algorithm for SlidingLog {
                 stats: Stats {
                     remaining: limit.saturating_sub(used),
                     reset_after,
+                    ..Stats::default()
                 },
                 retry: Retry::Never,
             };
@@ -82,6 +83,7 @@ impl Algorithm for SlidingLog {
                     } else {
                         reset_after
                     },
+                    ..Stats::default()
                 },
             },
             _ => {
@@ -103,6 +105,7 @@ impl Algorithm for SlidingLog {
                     stats: Stats {
                         remaining: limit.saturating_sub(used),
                         reset_after,
+                        ..Stats::default()
                     },
                     retry: Retry::After(retry),
                 }

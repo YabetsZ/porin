@@ -751,11 +751,13 @@ pub(crate) struct Reply {
     reset_after_us: u64,
     /// Microseconds; -1 for never.
     retry_after_us: i64,
+    limiting: u8,
+    limiting_reset_us: u64,
 }
 
 impl Reply {
     fn from_redis(values: &[i64]) -> Option<Self> {
-        let [allowed, remaining, reset, retry] = *values else {
+        let [allowed, remaining, reset, retry, limiting, limiting_reset] = *values else {
             return None;
         };
         Some(Self {
@@ -763,6 +765,8 @@ impl Reply {
             remaining: u32::try_from(remaining).ok()?,
             reset_after_us: u64::try_from(reset).ok()?,
             retry_after_us: retry,
+            limiting: u8::try_from(limiting).ok()?,
+            limiting_reset_us: u64::try_from(limiting_reset).ok()?,
         })
     }
 
@@ -770,6 +774,8 @@ impl Reply {
         let stats = Stats {
             remaining: self.remaining,
             reset_after: Duration::from_micros(self.reset_after_us),
+            limiting: self.limiting,
+            limiting_reset: Duration::from_micros(self.limiting_reset_us),
         };
         if self.allowed {
             return Outcome::Allowed(stats);

@@ -52,6 +52,7 @@ impl Algorithm for FixedWindow {
             } else {
                 window_end
             },
+            ..Stats::default()
         };
 
         if cost > limit {
@@ -128,10 +129,7 @@ mod tests {
         assert_eq!(
             FixedWindow::check(rate, &state, at(1_250), 1),
             Check::Denied {
-                stats: Stats {
-                    remaining: 0,
-                    reset_after: Duration::from_millis(750)
-                },
+                stats: Stats::new(0, Duration::from_millis(750)),
                 retry: Retry::After(Duration::from_millis(750)),
             }
         );

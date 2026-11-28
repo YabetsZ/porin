@@ -8,7 +8,8 @@
 -- ARGV[4 + 3(i - 1) ..]  period (us), count, burst of rate i
 --
 -- Returns {allowed (1 or 0), remaining, reset_after (us), retry_after
--- (us, -1 for never, 0 when allowed)}. The algorithm part defines check and
+-- (us, -1 for never, 0 when allowed), limiting rate (0-based), its
+-- reset_after (us)}. The algorithm part defines check and
 -- storage: storage.read(key) loads the state check reads, and
 -- storage.write(key, spec, commit, now) records an allowed hit's commit and
 -- sets the key to expire once the state is idle.
@@ -37,29 +38,36 @@ for i = 1, #KEYS do
   if not results[i].allowed then all_allowed = false end
 end
 
--- The tightest stats: fewest units remaining, longest reset.
-local function tighten(summary, result)
+-- The tightest stats: fewest units remaining, longest reset. Also which
+-- rate is closest to running out (fewest left, then longest reset, then
+-- the first) and that rate's own reset, as src/algorithm.rs does.
+local function tighten(summary, index, result)
+  if result.remaining < summary.remaining
+    or (result.remaining == summary.remaining and result.reset > summary.limiting_reset) then
+    summary.limiting = index
+    summary.limiting_reset = result.reset
+  end
   if result.remaining < summary.remaining then summary.remaining = result.remaining end
   if result.reset > summary.reset then summary.reset = result.reset end
 end
 
-local summary = { remaining = 4294967295, reset = 0 }
+local summary = { remaining = 4294967295, reset = 0, limiting = 0, limiting_reset = 0 }
 if all_allowed then
   for i = 1, #KEYS do
-    tighten(summary, results[i])
+    tighten(summary, i - 1, results[i])
     -- A peek records nothing.
     if record and cost > 0 then
       storage.write(KEYS[i], specs[i], results[i].commit, now)
     end
   end
-  return { 1, summary.remaining, summary.reset, 0 }
+  return { 1, summary.remaining, summary.reset, 0, summary.limiting, summary.limiting_reset }
 end
 
 -- Allowed rates reported stats as if the hit were recorded. It isn't, so
 -- report what every rate has without it, and wait for the slowest denial.
 local retry = 0
 for i = 1, #KEYS do
-  tighten(summary, check(specs[i], states[i], now, 0))
+  tighten(summary, i - 1, check(specs[i], states[i], now, 0))
   local result = results[i]
   if not result.allowed then
     if result.retry == -1 or retry == -1 then
@@ -69,4 +77,4 @@ for i = 1, #KEYS do
     end
   end
 end
-return { 0, summary.remaining, summary.reset, retry }
+return { 0, summary.remaining, summary.reset, retry, summary.limiting, summary.limiting_reset }

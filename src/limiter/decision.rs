@@ -49,6 +49,8 @@ impl Decision {
                     remaining: 0,
                     reset_after: retry_after,
                     known: true,
+                    limiting: 0,
+                    limiting_reset: retry_after,
                 },
                 retry_after: Some(retry_after),
                 cause: Cause::StoreFull,
@@ -66,6 +68,8 @@ impl Decision {
             remaining: 0,
             reset_after: Duration::ZERO,
             known: false,
+            limiting: 0,
+            limiting_reset: Duration::ZERO,
         })
     }
 
@@ -80,6 +84,8 @@ impl Decision {
                 remaining: 0,
                 reset_after: Duration::ZERO,
                 known: false,
+                limiting: 0,
+                limiting_reset: Duration::ZERO,
             },
             retry_after: Some(retry_after),
             cause: Cause::StoreUnavailable,
@@ -94,6 +100,10 @@ pub struct Stats {
     remaining: u32,
     reset_after: Duration,
     known: bool,
+    /// Which rate of the quota is closest to running out, and its own
+    /// reset, for headers that describe a single rate.
+    pub(crate) limiting: u8,
+    pub(crate) limiting_reset: Duration,
 }
 
 impl Stats {
@@ -126,6 +136,8 @@ impl From<CoreStats> for Stats {
             remaining: stats.remaining,
             reset_after: stats.reset_after,
             known: true,
+            limiting: stats.limiting,
+            limiting_reset: stats.limiting_reset,
         }
     }
 }

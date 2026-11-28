@@ -62,6 +62,7 @@ impl Algorithm for SlidingWindow {
         let report = |estimate: u32| Stats {
             remaining: limit.saturating_sub(estimate),
             reset_after,
+            ..Stats::default()
         };
 
         if cost > limit {
@@ -86,6 +87,7 @@ impl Algorithm for SlidingWindow {
                         } else {
                             reset_after
                         },
+                        ..Stats::default()
                     },
                 }
             }
@@ -243,10 +245,7 @@ mod tests {
         assert_eq!(
             SlidingWindow::check(rate, &state, at(1_000), 1),
             Check::Denied {
-                stats: Stats {
-                    remaining: 0,
-                    reset_after: Duration::from_secs(1)
-                },
+                stats: Stats::new(0, Duration::from_secs(1)),
                 retry: Retry::After(Duration::from_millis(100)),
             }
         );

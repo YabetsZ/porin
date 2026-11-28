@@ -132,6 +132,7 @@ impl Bucket {
         Stats {
             remaining,
             reset_after: self.spec.duration(tat.saturating_sub(now)),
+            ..Stats::default()
         }
     }
 }
@@ -174,10 +175,7 @@ mod tests {
         assert_eq!(
             hit(rate, &mut state, at(1_000), 1),
             Check::Denied {
-                stats: Stats {
-                    remaining: 0,
-                    reset_after: Duration::from_secs(1)
-                },
+                stats: Stats::new(0, Duration::from_secs(1)),
                 retry: Retry::After(Duration::from_millis(100)),
             },
             "11th hit waits one emission interval"
@@ -268,10 +266,7 @@ mod tests {
         assert_eq!(
             check,
             Check::Denied {
-                stats: Stats {
-                    remaining: 0,
-                    reset_after: Duration::from_secs(6)
-                },
+                stats: Stats::new(0, Duration::from_secs(6)),
                 retry: Retry::After(Duration::from_secs(6)),
             }
         );
