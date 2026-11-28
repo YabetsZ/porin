@@ -47,6 +47,9 @@ pub mod quota;
 pub mod store;
 #[cfg(feature = "memory")]
 mod sync;
+#[cfg(feature = "tower")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tower")))]
+pub mod tower;
 
 pub use algorithm::fixed_window::FixedWindow;
 pub use algorithm::gcra::TokenBucket;

@@ -4,7 +4,7 @@
 pub(crate) mod breaker;
 pub(crate) mod scripts;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::fmt;
 use std::marker::PhantomData;

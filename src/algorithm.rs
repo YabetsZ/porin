@@ -24,6 +24,14 @@ pub(crate) trait Algorithm {
     /// What to write into the state once a hit is allowed.
     type Commit;
 
+    /// Whether the algorithm allows a rate's burst at once, rather than
+    /// its count per period.
+    #[cfg_attr(
+        all(feature = "memory", not(feature = "tower")),
+        expect(dead_code, reason = "only the tower layer's headers describe bursts")
+    )]
+    const BURSTS: bool = false;
+
     /// Checks whether `cost` units may be spent at `now`, without changing
     /// anything. A cost of 0 asks for the current stats. Times are in
     /// `spec`'s ticks.

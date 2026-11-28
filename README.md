@@ -2,7 +2,7 @@
 
 Rate limiting for Rust services: several algorithms, shared storage, any framework.
 
-> **Status:** early development. The in-memory and Redis limiters work; the tower layer and peer mode are next.
+> **Status:** early development. The in-memory and Redis limiters and the tower layer work; peer mode comes in v0.2.
 
 A porin is a protein that forms a channel through a cell membrane and controls what passes. This crate does the same for requests.
 
@@ -41,10 +41,21 @@ let limiter: Limiter<u64, _, _> = Limiter::redis_builder(&redis, "api")
     .build()?;
 ```
 
+- **tower** (feature `tower`, `axum` for axum's connection info): a layer for axum, tonic and hyper. It keys requests by client IP (IPv6 by /64, proxies only when trusted), a header or a function, answers 429 with `Retry-After`, and adds `RateLimit-Policy` and `RateLimit` headers
+
+```rust
+use porin::tower::{PeerIp, RateLimitLayer};
+
+let limiter: Limiter<IpAddr> = Limiter::memory(quota!("5/second; 100/day"));
+let app = Router::new()
+    .route("/", get(handler))
+    .layer(RateLimitLayer::new(limiter, PeerIp::new()));
+```
+
 ## Planned
 
 - **Storage:** in v0.2, **peer mode**, which enforces a global limit with no central store
-- **Frameworks:** a tower layer (axum, tonic, hyper), and actix in v0.2
+- **Frameworks:** actix and poem in v0.2
 
 ## Prior art
 

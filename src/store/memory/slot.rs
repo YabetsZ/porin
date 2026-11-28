@@ -18,7 +18,7 @@ use crate::{Quota, Rate, Timestamp};
 /// An algorithm the memory store can hold, and how it holds its states.
 pub(crate) trait Stored: Algorithm + Sized {
     /// States for up to `N` rates.
-    type Slot<const N: usize>: Slot;
+    type Slot<const N: usize>: Slot + Send + Sync;
 }
 
 /// One key's states for every rate of a quota.

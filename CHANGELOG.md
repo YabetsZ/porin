@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `porin::tower` (feature `tower`): `RateLimitLayer`, a tower layer for axum, tonic and hyper, over a memory or Redis limiter. Requests are keyed by `PeerIp` (the TCP peer, or with `trusting_proxies` the one `ProxyHeader` the proxies write; IPv6 grouped by /64), `Header` (one value of at most 512 bytes) or `from_fn`. Limited requests get 429 with `Retry-After`; an unavailable or failing store 503; a missing or too long key 400, or a `fallback_key`. Responses carry the IETF draft `RateLimit-Policy` and `RateLimit` headers, or `X-RateLimit-*` with `Headers::Legacy`. A full store answers 429, or 503 with `FullStore::ServiceUnavailable`.
+- Feature `axum`: `PeerIp` reads axum's `ConnectInfo`. An axum example.
+
 ## [0.1.0-alpha.2] - 2026-11-28
 
 The Redis store. The API may still change before 0.1.0.

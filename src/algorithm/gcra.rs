@@ -48,6 +48,8 @@ impl Algorithm for TokenBucket {
     type State = GcraState;
     type Commit = GcraState;
 
+    const BURSTS: bool = true;
+
     fn check_ticks(spec: Spec, state: &GcraState, now: u64, cost: u32) -> Check<GcraState> {
         let bucket = Bucket::new(spec);
         // If the clock went backwards, the stored TAT is kept: the bucket
