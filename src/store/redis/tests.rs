@@ -696,3 +696,153 @@ fn mul_div_is_exact_where_doubles_round_wrongly() {
         panic!("{error}");
     }
 }
+
+/// Quotas whose rates refill in whole microseconds, where nanoseconds and
+/// microseconds give the same answers.
+fn even_quota(token_bucket: bool) -> impl Strategy<Value = Quota> {
+    let one = (
+        prop::sample::select(&[1_u32, 2, 4, 5, 8, 10, 20, 25, 40, 50, 100, 1_000][..]),
+        prop::sample::select(&[1_u64, 1_000, 60_000, 3_600_000][..]),
+        1..=8_u32,
+    );
+    prop::collection::vec(one, 1..=MAX_RATES).prop_map(move |rates| {
+        let make = |&(count, period_ms, burst): &(u32, u64, u32)| {
+            rate(count, period_ms, if token_bucket { burst } else { count })
+        };
+        let mut quota = Quota::new(make(&rates[0]));
+        for spec in &rates[1..] {
+            if let Ok(with) = quota.with(make(spec)) {
+                quota = with;
+            }
+        }
+        quota
+    })
+}
+
+/// A memory limiter in nanoseconds and the Redis script in microseconds,
+/// fed the same hits at whole microseconds: they allow and deny alike and
+/// report the same units left. Redis rounds times up to whole
+/// microseconds, so its reset and retry times may be later, by less than
+/// one, and never earlier.
+fn memory_and_redis_agree<A: crate::Algorithm + Default>(token_bucket: bool) {
+    use crate::{Decision, Limiter, ManualClock, Timestamp};
+
+    let Some(server) = server() else { return };
+    let runtime = runtime();
+    let client = ::redis::Client::open(server.url.as_str()).unwrap();
+    let connection = runtime
+        .block_on(client.get_multiplexed_async_connection())
+        .unwrap();
+    let start = start_us();
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(96);
+    let mut runner = TestRunner::new(Config::with_cases(cases));
+    let result = runner.run(&(even_quota(token_bucket), ops()), |(quota, ops)| {
+        let mut connection = connection.clone();
+        runtime
+            .block_on(::redis::cmd("FLUSHALL").query_async::<()>(&mut connection))
+            .unwrap();
+        let clock = ManualClock::new();
+        let memory: Limiter<u8, A> = Limiter::builder()
+            .algorithm(A::default())
+            .quota(quota)
+            .clock(clock.clone())
+            .build();
+        let mut now = start;
+        for (key, step, cost, record) in ops {
+            now = now.saturating_add_signed(step);
+            clock.set(Timestamp::from_nanos(now * 1_000));
+            let keys: Vec<String> = (0..quota.rates().len())
+                .map(|rate| format!("test:{{{key}}}:{rate}"))
+                .collect();
+            let redis = runtime
+                .block_on(run_script::<A, _>(
+                    &mut connection,
+                    &quota,
+                    &keys,
+                    record,
+                    cost,
+                    Some(now),
+                ))
+                .unwrap()
+                .outcome();
+            let local = if record {
+                runtime.block_on(memory.hit_n(&key, cost))
+            } else {
+                runtime.block_on(memory.test_n(&key, cost))
+            }
+            .unwrap();
+            let context = format!("key {key} at {now} cost {cost} record {record}");
+            let (redis_stats, redis_retry) = match redis {
+                Outcome::Allowed(stats) => (stats, None),
+                Outcome::Denied { stats, retry } => (stats, Some(retry)),
+            };
+            prop_assert_eq!(local.is_allowed(), redis_retry.is_none(), "{}", context);
+            prop_assert_eq!(
+                local.stats().remaining(),
+                redis_stats.remaining,
+                "{}",
+                context
+            );
+            let close = |memory: Duration, redis: Duration| {
+                redis
+                    .checked_sub(memory)
+                    .is_some_and(|late| late < Duration::from_micros(1))
+            };
+            prop_assert!(
+                close(local.stats().reset_after(), redis_stats.reset_after),
+                "reset {:?} vs {:?}: {}",
+                local.stats().reset_after(),
+                redis_stats.reset_after,
+                context
+            );
+            if let (Decision::Denied(denial), Some(retry)) = (local, redis_retry) {
+                match (denial.retry_after(), retry) {
+                    (None, crate::algorithm::Retry::Never) => {}
+                    (Some(memory), crate::algorithm::Retry::After(redis)) => {
+                        prop_assert!(
+                            close(memory, redis),
+                            "retry {:?} vs {:?}: {}",
+                            memory,
+                            redis,
+                            context
+                        );
+                    }
+                    (memory, redis) => {
+                        prop_assert!(false, "retry {:?} vs {:?}: {}", memory, redis, context);
+                    }
+                }
+            }
+        }
+        Ok::<(), TestCaseError>(())
+    });
+    if let Err(error) = result {
+        panic!("{error}");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn memory_and_redis_token_buckets_agree() {
+    memory_and_redis_agree::<TokenBucket>(true);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn memory_and_redis_fixed_windows_agree() {
+    memory_and_redis_agree::<FixedWindow>(false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn memory_and_redis_sliding_windows_agree() {
+    memory_and_redis_agree::<SlidingWindow>(false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+fn memory_and_redis_sliding_logs_agree() {
+    memory_and_redis_agree::<SlidingLog>(false);
+}
