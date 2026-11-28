@@ -54,3 +54,30 @@ fn is_send_sync_and_clone() {
     fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
     assert_send_sync_clone::<Limiter<String>>();
 }
+
+#[test]
+fn a_bounded_wait_gives_up_without_sleeping() {
+    let limiter: Limiter<u64> = Limiter::memory(quota!("1/minute"));
+    assert!(limiter.hit(&1).unwrap().is_allowed());
+    let start = Instant::now();
+    let decision = limiter
+        .until_ready_within(&1, Duration::from_secs(1))
+        .unwrap();
+    assert!(!decision.is_allowed(), "the next unit is a minute away");
+    assert!(start.elapsed() < Duration::from_millis(500));
+    let never = limiter
+        .until_ready_n_within(&2, 2, Duration::from_secs(3600))
+        .unwrap();
+    assert!(!never.is_allowed(), "2 units never fit a burst of 1");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "real-time waits are too slow under Miri")]
+fn a_bounded_wait_sleeps_when_the_unit_comes_in_time() {
+    let limiter: Limiter<u64> = Limiter::memory(quota!("100/second"));
+    assert!(limiter.hit_n(&1, 100).unwrap().is_allowed());
+    let decision = limiter
+        .until_ready_within(&1, Duration::from_secs(1))
+        .unwrap();
+    assert!(decision.is_allowed(), "the next unit comes in 10 ms");
+}

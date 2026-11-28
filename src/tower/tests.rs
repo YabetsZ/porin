@@ -593,7 +593,11 @@ async fn an_axum_router_keys_by_connect_info() {
 async fn grpc_services_get_grpc_statuses() {
     use super::Protocol;
 
-    let limiter: Limiter<IpAddr> = Limiter::memory(quota!("1/minute"));
+    // A frozen clock, so the retry hint is exact however slowly this runs.
+    let limiter: Limiter<IpAddr> = Limiter::builder()
+        .quota(quota!("1/minute"))
+        .clock(crate::ManualClock::new())
+        .build();
     let layer = RateLimitLayer::new(limiter, PeerIp::new()).protocol(Protocol::Grpc);
     assert_eq!(
         send(&layer, from("10.0.0.1:1")).await.status(),

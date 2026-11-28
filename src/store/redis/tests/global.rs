@@ -47,3 +47,39 @@ async fn a_global_limit_is_shared_by_every_instance() {
         "and it doesn't wait for it"
     );
 }
+
+#[tokio::test]
+#[cfg_attr(miri, ignore = "needs a Redis server")]
+async fn a_bounded_wait_gives_up_during_an_outage() {
+    use crate::store::FailClosed;
+
+    let Some(mut server) = spawn_server(free_port(), &[]) else {
+        return;
+    };
+    let redis = RedisStore::builder(server.url.as_str())
+        .on_failure(FailClosed)
+        .connect()
+        .await
+        .unwrap();
+    let limiter: Limiter<(), _, _> = Limiter::redis_builder(&redis, "outage")
+        .quota(quota!("10/second"))
+        .build()
+        .unwrap();
+    server.stop();
+    // Fail closed denies with a retry time; waiting for Redis to come back
+    // would take longer than allowed, so it gives up instead of sleeping on.
+    let start = Instant::now();
+    let decision = limiter
+        .until_ready_within(&(), Duration::from_millis(50))
+        .await
+        .unwrap();
+    let crate::Decision::Denied(denial) = decision else {
+        panic!("fail closed denies while Redis is down");
+    };
+    assert!(denial.is_store_unavailable());
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
+}

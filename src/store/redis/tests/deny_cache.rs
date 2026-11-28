@@ -229,6 +229,9 @@ fn never_allows_what_redis_would_deny() {
     let ops = prop::collection::vec((0..3_u64, 0..25_u32, 0..10_u8), 1..80);
     let mut runner = TestRunner::new(Config::with_cases(cases));
     let (case, allowed, denied) = (Cell::new(0_u32), Cell::new(0_u32), Cell::new(0_u32));
+    // Calls that would each run a script without the cache.
+    let calls = Cell::new(0_u64);
+    let scripts_before = script_calls(&server.url);
     let result = runner.run(&ops, |ops| {
         case.set(case.get() + 1);
         let limiter: Limiter<u64, SlidingLog, _> =
@@ -247,10 +250,12 @@ fn never_allows_what_redis_would_deny() {
                     *spent = 0;
                 }
                 1 | 2 => {
+                    calls.set(calls.get() + 1);
                     let decision = runtime.block_on(limiter.test_n(&key, cost)).unwrap();
                     prop_assert!(!decision.is_allowed() || fits, "test {key} {cost}");
                 }
                 _ => {
+                    calls.set(calls.get() + 1);
                     let decision = runtime.block_on(limiter.hit_n(&key, cost)).unwrap();
                     prop_assert!(
                         !decision.is_allowed() || fits,
@@ -277,5 +282,13 @@ fn never_allows_what_redis_would_deny() {
     assert!(
         allowed > 0 && denied > 0,
         "{allowed} allowed, {denied} denied"
+    );
+    // And the cache answered some of them: without it, every call would
+    // have run a script.
+    let scripts = script_calls(&server.url) - scripts_before;
+    assert!(
+        scripts < calls.get(),
+        "{scripts} scripts for {} calls: the cache never answered",
+        calls.get()
     );
 }
