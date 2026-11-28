@@ -85,12 +85,15 @@ impl Algorithm for SlidingLog {
                 },
             },
             _ => {
-                // Wait until enough of the oldest live entries expire.
-                let must_free = used.saturating_add(cost).saturating_sub(limit);
-                let mut freed = 0_u32;
+                // Wait until enough of the oldest live entries expire. In
+                // u64, as used + cost can pass u32::MAX.
+                let must_free = u64::from(used)
+                    .saturating_add(u64::from(cost))
+                    .saturating_sub(u64::from(limit));
+                let mut freed = 0_u64;
                 let mut retry = reset_after;
                 for (time, entry_cost) in live() {
-                    freed = freed.saturating_add(*entry_cost);
+                    freed = freed.saturating_add(u64::from(*entry_cost));
                     if freed >= must_free {
                         retry = until_expiry(*time);
                         break;
@@ -182,6 +185,20 @@ mod tests {
         assert_eq!(
             SlidingLog::check(rate, &state, at(500), 3).retry(),
             Some(Retry::After(Duration::from_millis(700)))
+        );
+    }
+
+    #[test]
+    fn retry_counts_past_u32_max() {
+        let rate = per_second(u32::MAX);
+        let mut state = SlidingLogState::default();
+        hit(rate, &mut state, at(0), u32::MAX - 10);
+        hit(rate, &mut state, at(100), 10);
+        // Cost u32::MAX needs both entries gone, though used + cost
+        // overflows a u32.
+        assert_eq!(
+            SlidingLog::check(rate, &state, at(200), u32::MAX).retry(),
+            Some(Retry::After(Duration::from_millis(900)))
         );
     }
 
