@@ -265,7 +265,11 @@ impl Stats {
     /// A one-rate quota's summary of that rate's stats, as
     /// [`check_quota`] would report it.
     pub(crate) fn of_one_rate(self) -> Self {
-        Self::UNLIMITED.tightest(0, self)
+        Self {
+            limiting: 0,
+            limiting_reset: self.reset_after,
+            ..self
+        }
     }
 
     /// The summary with rate `index`'s stats folded in.
