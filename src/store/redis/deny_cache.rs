@@ -133,9 +133,10 @@ impl DenyCache {
             .unwrap_or_else(PoisonError::into_inner);
         let shard = &mut *shard;
         if let Some(cached) = shard.entries.find_mut(hash, |cached| &*cached.key == key) {
-            // Only a costlier hit than the cached one reaches Redis while
-            // the cached denial lasts, and Redis denied it: the newer
-            // denial replaces the old one.
+            // A costlier hit, or one already on its way when the entry was
+            // cached, reached Redis and was denied: the newer denial
+            // replaces the old one. It may be weaker (a smaller cost or an
+            // earlier end), which only sends more hits to Redis.
             *cached = entry;
         } else {
             if shard.entries.len() >= shard.capacity {

@@ -190,7 +190,9 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
 
     /// Forgets `key`, giving it its full allowance back. Once Redis has
     /// forgotten it, so do this instance's deny cache and fallback; other
-    /// instances keep theirs.
+    /// instances keep theirs. A denial Redis gave just before the reset can
+    /// still reach this instance's deny cache after it, denying the key
+    /// until that denial's retry time: later than needed, never early.
     ///
     /// # Errors
     ///
@@ -238,7 +240,8 @@ impl<K: KeyEncode, A: Algorithm, P: FailurePolicy> Limiter<K, A, RedisStore<P>> 
 
     /// Spends one unit for `key`, waiting at most `max_wait`. See
     /// [`Limiter::until_ready_within`](Limiter#method.until_ready_within)
-    /// on the memory store.
+    /// on the memory store. As for any call, a hit that timed out may
+    /// still be recorded by a slow Redis, so giving up can still spend.
     ///
     /// # Errors
     ///

@@ -7,6 +7,12 @@ use std::time::Duration;
 /// for logs, metrics and alerts. See
 /// [`RedisStoreBuilder::on_event`](super::RedisStoreBuilder::on_event).
 ///
+/// Each opening and closing is reported once, but the hook runs after the
+/// change, on whichever call made it: under concurrency an opening and the
+/// closing that follows it can reach the hook in either order. Read the
+/// breaker's state from the latest event's arrival with that in mind, or
+/// treat events as hints for logs and alerts.
+///
 /// Answers the failure policy gives instead of Redis are counted by
 /// [`RedisStore::policy_answers`](super::RedisStore::policy_answers) rather
 /// than reported one by one: during an outage there is one per call.

@@ -27,15 +27,25 @@ const DEFAULT_MAX_KEYS: NonZeroUsize = match NonZeroUsize::new(100_000) {
 /// stretched by the same factor, rounded up: `10/day` over 50 instances
 /// becomes `1/5 days`. So the shares never add up to more than the quota,
 /// except that each instance can always spend one unit at once: `instances`
-/// units in a burst across the fleet, however small the quota.
+/// units in a burst across the fleet, however small the quota, and twice
+/// that across a window boundary with [`FixedWindow`].
 ///
 /// # Over-admission
 ///
-/// The instances don't share the fallback's state. If more instances run
-/// than `instances` says, together they admit more than the quota; with
-/// `instances` set to 1, up to as many times the quota as there are
-/// instances. Set it to the number of instances that share the Redis, and
-/// raise it when you scale out.
+/// The instances don't share the fallback's state, and Redis and the
+/// fallback don't share theirs. So, even with `instances` right:
+///
+/// - In a window that spans a failure, a key can spend its quota in Redis
+///   and again in the fallback: up to about twice the quota. The same goes
+///   while Redis flaps, or is slow enough that only some calls time out,
+///   or is out of reach for only some instances.
+/// - If more instances run than `instances` says, together they admit
+///   more than the quota; with `instances` set to 1, up to as many times
+///   the quota as there are instances, on top of the above.
+///
+/// Set `instances` to the number of instances that share the Redis, raise
+/// it when you scale out, and choose [`FailClosed`](super::super::FailClosed)
+/// where even twice the quota is too much.
 ///
 /// # What it does not do
 ///
