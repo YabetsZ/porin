@@ -14,12 +14,15 @@ categories = ["network-programming", "web-programming", "concurrency"]
 default = ["memory"]
 memory = ["dep:futures-timer", "dep:hashbrown"]
 blocking = ["memory"]
+redis-tokio = ["memory", "dep:redis", "redis/tokio-comp"]
+redis-smol = ["memory", "dep:redis", "redis/smol-comp"]
 quanta = ["dep:quanta"]
 
 [dependencies]
 futures-timer = { version = "3.0.4", optional = true }
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"], optional = true }
 quanta = { version = "0.12.6", optional = true }
+redis = { version = "1.2.2", optional = true, default-features = false, features = ["script", "connection-manager", "cluster-async", "sentinel"] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -54,6 +57,11 @@ governor = "0.10.4"
 pollster = "1.0.3"
 proptest = "1.11.0"
 trybuild = "1.0.119"
+
+# Only the Redis tests and benchmark use tokio, and it doesn't build under
+# `--cfg loom`.
+[target.'cfg(not(loom))'.dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "memory"

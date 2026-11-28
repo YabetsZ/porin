@@ -328,7 +328,7 @@ pub struct QuotaError {
 }
 
 impl QuotaError {
-    const fn new(kind: QuotaErrorKind, position: Option<usize>) -> Self {
+    pub(crate) const fn new(kind: QuotaErrorKind, position: Option<usize>) -> Self {
         Self { kind, position }
     }
 
@@ -394,6 +394,9 @@ pub enum QuotaErrorKind {
     TooManyRates,
     /// Two rates have the same period.
     DuplicatePeriod,
+    /// A token bucket takes longer than about 71 years (2^51 µs) to refill
+    /// completely, past what a Redis store counts exactly.
+    RefillTooLong,
 }
 
 impl QuotaErrorKind {
@@ -417,6 +420,9 @@ impl QuotaErrorKind {
             Self::ExpectedSemicolon => "expected `;` between rates",
             Self::TooManyRates => "a quota holds at most 4 rates",
             Self::DuplicatePeriod => "two rates have the same period",
+            Self::RefillTooLong => {
+                "a token bucket that refills over more than 71 years can't be kept in Redis"
+            }
         }
     }
 }

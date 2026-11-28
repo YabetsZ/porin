@@ -7,6 +7,11 @@ yanked = "deny"
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.9
+# Pulled in by the redis crate, used unmodified.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "smol-timeout" },
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+]
 
 [bans]
 multiple-versions = "warn"

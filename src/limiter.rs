@@ -1,6 +1,8 @@
 //! The [`Limiter`]: the type applications hold and call.
 
 mod decision;
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub(crate) mod redis;
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -11,7 +13,7 @@ use std::sync::Arc;
 
 pub use self::decision::{Decision, Denial, Stats};
 use crate::store::memory::{MemoryStore, Stored};
-use crate::store::{Hit, WhenFull};
+use crate::store::{Hit, Memory, Store, WhenFull};
 use crate::{Clock, MonotonicClock, Quota, TokenBucket};
 
 /// Keys tracked at once unless [`Builder::max_keys`] says otherwise.
@@ -35,30 +37,67 @@ mod sealed {
         private_bounds,
         reason = "the sealing: outside crates can't name or implement it"
     )]
+    #[cfg(not(any(feature = "redis-tokio", feature = "redis-smol")))]
     pub trait Sealed: crate::store::memory::Stored {}
-}
 
-impl<A> sealed::Sealed for A where A: Stored {}
-impl<A> Algorithm for A where A: Stored + Copy + fmt::Debug + Send + Sync + 'static {}
-
-/// The store failed, so the limiter couldn't decide.
-///
-/// The memory store can't fail, so a memory limiter never returns this.
-/// Stores that talk to a server add variants. A denied hit is a
-/// [`Decision`], not an error.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum Error {}
-
-impl fmt::Display for Error {
-    fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {}
+    /// With a Redis store, every algorithm also has a script.
+    #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+    #[expect(
+        private_bounds,
+        reason = "the sealing: outside crates can't name or implement it"
+    )]
+    pub trait Sealed:
+        crate::store::memory::Stored + crate::store::redis::scripts::Scripted
+    {
     }
 }
 
-impl std::error::Error for Error {}
+#[cfg(not(any(feature = "redis-tokio", feature = "redis-smol")))]
+impl<A> sealed::Sealed for A where A: Stored {}
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+impl<A> sealed::Sealed for A where A: Stored + crate::store::redis::scripts::Scripted {}
+impl<A> Algorithm for A where A: sealed::Sealed + Copy + fmt::Debug + Send + Sync + 'static {}
 
-/// A rate limiter for keys of type `K`, running algorithm `A`.
+/// The limiter couldn't decide.
+///
+/// A memory limiter never returns this. A denied hit is a [`Decision`],
+/// not an error.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Error {
+    /// The store failed or didn't answer in time. A remote store returns
+    /// this for outages only under the
+    /// [`Propagate`](crate::store::Propagate) policy, but under every
+    /// policy when the store answers with an error that retrying won't fix,
+    /// such as refused credentials. The source is the store client's error,
+    /// if there was one, rather than an open circuit.
+    Store(Box<dyn std::error::Error + Send + Sync>),
+    /// The key's [encoding](crate::KeyEncode) is longer than a remote
+    /// store accepts: 512 bytes. Keys often carry client input, so this
+    /// keeps a client from filling Redis with huge keys.
+    KeyTooLong,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(source) => write!(f, "the rate limit store failed: {source}"),
+            Self::KeyTooLong => f.write_str("the rate limit key encodes to more than 512 bytes"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(source) => Some(&**source),
+            Self::KeyTooLong => None,
+        }
+    }
+}
+
+/// A rate limiter for keys of type `K`, running algorithm `A`, keeping its
+/// state in store `S`.
 ///
 /// Cloning is cheap and clones share state, so build one limiter and clone
 /// it into every handler or task.
@@ -78,15 +117,23 @@ impl std::error::Error for Error {}
 /// # }).unwrap();
 /// ```
 #[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
-pub struct Limiter<K, A: Algorithm = TokenBucket> {
-    inner: Arc<Inner<K, A>>,
+pub struct Limiter<K, A: Algorithm = TokenBucket, S: Store = Memory> {
+    pub(crate) inner: Arc<S::Inner<K, A>>,
 }
 
-struct Inner<K, A: Stored> {
+/// What a memory limiter holds.
+pub struct MemoryInner<K, A: Algorithm> {
     quota: Quota,
     algorithm: A,
     clock: Box<dyn Clock>,
     store: SizedStore<K, A>,
+}
+
+/// What a builder holds for the memory store.
+pub struct MemoryConfig {
+    max_keys: NonZeroUsize,
+    when_full: WhenFull,
+    clock: Box<dyn Clock>,
 }
 
 /// The memory store with entries sized to the quota's rate count: a 1-rate
@@ -151,9 +198,11 @@ impl<K: Hash + Eq> Limiter<K> {
         Builder {
             algorithm: TokenBucket,
             quota: NoQuota,
-            max_keys: DEFAULT_MAX_KEYS,
-            when_full: WhenFull::Refuse,
-            clock: Box::new(MonotonicClock::new()),
+            config: MemoryConfig {
+                max_keys: DEFAULT_MAX_KEYS,
+                when_full: WhenFull::Refuse,
+                clock: Box::new(MonotonicClock::new()),
+            },
             keys: PhantomData,
         }
     }
@@ -164,7 +213,7 @@ impl<K: Hash + Eq> Limiter<K> {
     clippy::unused_async_trait_impl,
     reason = "the memory store answers at once; stores that talk to a server will await"
 )]
-impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
+impl<K: Hash + Eq, A: Algorithm> Limiter<K, A, Memory> {
     /// Spends one unit for `key`, if its quota allows.
     ///
     /// # Errors
@@ -339,7 +388,7 @@ impl<K: Hash + Eq, A: Algorithm> Limiter<K, A> {
     }
 }
 
-impl<K, A: Algorithm> Clone for Limiter<K, A> {
+impl<K, A: Algorithm, S: Store> Clone for Limiter<K, A, S> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -347,7 +396,7 @@ impl<K, A: Algorithm> Clone for Limiter<K, A> {
     }
 }
 
-impl<K, A: Algorithm> fmt::Debug for Limiter<K, A> {
+impl<K, A: Algorithm> fmt::Debug for Limiter<K, A, Memory> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = &*self.inner;
         let mut debug = f.debug_struct("Limiter");
@@ -365,83 +414,84 @@ pub struct NoQuota;
 
 /// Configures a [`Limiter`]. Start with [`Limiter::builder`].
 #[must_use = "a builder does nothing until `build` is called"]
-pub struct Builder<K, A, Q> {
-    algorithm: A,
-    quota: Q,
-    max_keys: NonZeroUsize,
-    when_full: WhenFull,
-    clock: Box<dyn Clock>,
-    keys: PhantomData<fn() -> K>,
+pub struct Builder<K, A, Q, S: Store = Memory> {
+    pub(crate) algorithm: A,
+    pub(crate) quota: Q,
+    pub(crate) config: S::Config,
+    pub(crate) keys: PhantomData<fn() -> K>,
 }
 
-impl<K, A, Q> Builder<K, A, Q> {
+impl<K, A, Q, S: Store> Builder<K, A, Q, S> {
     /// The algorithm to run. The default is [`TokenBucket`].
-    pub fn algorithm<B: Algorithm>(self, algorithm: B) -> Builder<K, B, Q> {
+    pub fn algorithm<B: Algorithm>(self, algorithm: B) -> Builder<K, B, Q, S> {
         Builder {
             algorithm,
             quota: self.quota,
-            max_keys: self.max_keys,
-            when_full: self.when_full,
-            clock: self.clock,
+            config: self.config,
             keys: PhantomData,
         }
     }
 
     /// The quota every key is limited to. Required.
-    pub fn quota(self, quota: Quota) -> Builder<K, A, Quota> {
+    pub fn quota(self, quota: Quota) -> Builder<K, A, Quota, S> {
         Builder {
             algorithm: self.algorithm,
             quota,
-            max_keys: self.max_keys,
-            when_full: self.when_full,
-            clock: self.clock,
+            config: self.config,
             keys: PhantomData,
         }
     }
+}
 
+impl<K, A, Q> Builder<K, A, Q, Memory> {
     /// The most keys tracked at once. The default is 1,000,000. Keys back
     /// to their full allowance are forgotten to make room; what happens when
     /// none are is set by [`when_full`](Self::when_full).
     pub fn max_keys(mut self, max_keys: NonZeroUsize) -> Self {
-        self.max_keys = max_keys;
+        self.config.max_keys = max_keys;
         self
     }
 
     /// What to do with a new key when every tracked key is still active.
     /// The default, [`WhenFull::Refuse`], never lets a key over its limit.
     pub fn when_full(mut self, policy: WhenFull) -> Self {
-        self.when_full = policy;
+        self.config.when_full = policy;
         self
     }
 
     /// Where time comes from. The default is a [`MonotonicClock`]; tests can
     /// pass a [`ManualClock`](crate::ManualClock) and move time by hand.
     pub fn clock(mut self, clock: impl Clock + 'static) -> Self {
-        self.clock = Box::new(clock);
+        self.config.clock = Box::new(clock);
         self
     }
 }
 
-impl<K: Hash + Eq, A: Algorithm> Builder<K, A, Quota> {
+impl<K: Hash + Eq, A: Algorithm> Builder<K, A, Quota, Memory> {
     /// Builds the limiter.
     #[must_use]
     pub fn build(self) -> Limiter<K, A> {
-        let overflow_rates = match self.when_full {
+        let MemoryConfig {
+            max_keys,
+            when_full,
+            clock,
+        } = self.config;
+        let overflow_rates = match when_full {
             WhenFull::Overflow(overflow) => overflow.rates().len(),
             WhenFull::Refuse | WhenFull::EvictNearestIdle { .. } => 0,
         };
         let rates = self.quota.rates().len().max(overflow_rates);
         let store = match rates {
-            0 | 1 => SizedStore::One(sized(self.max_keys, self.when_full)),
-            2 => SizedStore::Two(sized(self.max_keys, self.when_full)),
-            3 => SizedStore::Three(sized(self.max_keys, self.when_full)),
-            _ => SizedStore::Four(sized(self.max_keys, self.when_full)),
+            0 | 1 => SizedStore::One(sized(max_keys, when_full)),
+            2 => SizedStore::Two(sized(max_keys, when_full)),
+            3 => SizedStore::Three(sized(max_keys, when_full)),
+            _ => SizedStore::Four(sized(max_keys, when_full)),
         };
         Limiter {
-            inner: Arc::new(Inner {
+            inner: Arc::new(MemoryInner {
                 quota: self.quota,
                 algorithm: self.algorithm,
-                clock: self.clock,
+                clock,
                 store,
             }),
         }
@@ -455,11 +505,31 @@ fn sized<K: Hash + Eq, A: Stored, const N: usize>(
     MemoryStore::new(max_keys).when_full(when_full)
 }
 
-impl<K, A: fmt::Debug, Q: fmt::Debug> fmt::Debug for Builder<K, A, Q> {
+impl<K, A: fmt::Debug, Q: fmt::Debug, S: Store> fmt::Debug for Builder<K, A, Q, S>
+where
+    S::Config: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Builder")
             .field("algorithm", &self.algorithm)
             .field("quota", &self.quota)
+            .field("store", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K, A: Algorithm> fmt::Debug for MemoryInner<K, A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryInner")
+            .field("algorithm", &self.algorithm)
+            .field("quota", &self.quota)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for MemoryConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Memory")
             .field("max_keys", &self.max_keys)
             .field("when_full", &self.when_full)
             .finish_non_exhaustive()

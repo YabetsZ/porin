@@ -107,3 +107,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  redis:
+    # The Redis tests start their own servers, Cluster and Sentinel
+    # included, so they need the binary rather than a service container.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - run: sudo apt-get update && sudo apt-get install -y redis-server
+      - run: cargo nextest run --all-features store::redis
+        env:
+          PORIN_REQUIRE_REDIS: 1
+          PROPTEST_CASES: 256

@@ -42,17 +42,48 @@ impl Decision {
                     Retry::After(wait) => Some(wait),
                     Retry::Never => None,
                 },
-                store_full: false,
+                cause: Cause::Limit,
             }),
             Hit::Full { retry_after } => Self::Denied(Denial {
                 stats: Stats {
                     remaining: 0,
                     reset_after: retry_after,
+                    known: true,
                 },
                 retry_after: Some(retry_after),
-                store_full: true,
+                cause: Cause::StoreFull,
             }),
         }
+    }
+
+    /// An allowed hit the store couldn't confirm: [`FailOpen`](crate::store::FailOpen).
+    #[cfg_attr(
+        not(any(feature = "redis-tokio", feature = "redis-smol")),
+        expect(dead_code, reason = "only remote stores can be unavailable")
+    )]
+    pub(crate) const fn allowed_unconfirmed() -> Self {
+        Self::Allowed(Stats {
+            remaining: 0,
+            reset_after: Duration::ZERO,
+            known: false,
+        })
+    }
+
+    /// A hit denied because the store didn't answer: [`FailClosed`](crate::store::FailClosed).
+    #[cfg_attr(
+        not(any(feature = "redis-tokio", feature = "redis-smol")),
+        expect(dead_code, reason = "only remote stores can be unavailable")
+    )]
+    pub(crate) const fn denied_unavailable(retry_after: Duration) -> Self {
+        Self::Denied(Denial {
+            stats: Stats {
+                remaining: 0,
+                reset_after: Duration::ZERO,
+                known: false,
+            },
+            retry_after: Some(retry_after),
+            cause: Cause::StoreUnavailable,
+        })
     }
 }
 
@@ -62,20 +93,30 @@ impl Decision {
 pub struct Stats {
     remaining: u32,
     reset_after: Duration,
+    known: bool,
 }
 
 impl Stats {
     /// Units that can still be spent now, after this hit if it was allowed.
+    /// 0 when the stats aren't [known](Self::is_known).
     #[must_use]
     pub const fn remaining(&self) -> u32 {
         self.remaining
     }
 
     /// Time until the key is back to its full allowance, if nothing more is
-    /// spent.
+    /// spent. Zero when the stats aren't [known](Self::is_known).
     #[must_use]
     pub const fn reset_after(&self) -> Duration {
         self.reset_after
+    }
+
+    /// Whether the store reported these stats. False when a remote store
+    /// didn't answer and the limiter decided by its failure policy; skip
+    /// `RateLimit-*` headers then.
+    #[must_use]
+    pub const fn is_known(&self) -> bool {
+        self.known
     }
 }
 
@@ -84,6 +125,7 @@ impl From<CoreStats> for Stats {
         Self {
             remaining: stats.remaining,
             reset_after: stats.reset_after,
+            known: true,
         }
     }
 }
@@ -93,7 +135,14 @@ impl From<CoreStats> for Stats {
 pub struct Denial {
     stats: Stats,
     retry_after: Option<Duration>,
-    store_full: bool,
+    cause: Cause,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Cause {
+    Limit,
+    StoreFull,
+    StoreUnavailable,
 }
 
 impl Denial {
@@ -117,6 +166,14 @@ impl Denial {
     /// [`WhenFull`](crate::WhenFull).
     #[must_use]
     pub const fn is_store_full(&self) -> bool {
-        self.store_full
+        matches!(self.cause, Cause::StoreFull)
+    }
+
+    /// Whether a remote store didn't answer and the limiter denied by its
+    /// [`FailClosed`](crate::store::FailClosed) policy. A server may answer
+    /// these with 503. `retry_after` is when the store will be tried again.
+    #[must_use]
+    pub const fn is_store_unavailable(&self) -> bool {
+        matches!(self.cause, Cause::StoreUnavailable)
     }
 }

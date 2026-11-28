@@ -44,7 +44,7 @@ pub mod key;
 mod limiter;
 pub mod quota;
 #[cfg(feature = "memory")]
-mod store;
+pub mod store;
 #[cfg(feature = "memory")]
 mod sync;
 

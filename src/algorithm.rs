@@ -58,8 +58,11 @@ pub(crate) trait Algorithm {
 pub(crate) enum Unit {
     Nanos,
     #[cfg_attr(
-        feature = "memory",
-        expect(dead_code, reason = "for the Redis store, which counts in microseconds")
+        all(
+            feature = "memory",
+            not(any(feature = "redis-tokio", feature = "redis-smol"))
+        ),
+        expect(dead_code, reason = "only the Redis store counts in microseconds")
     )]
     Micros,
 }

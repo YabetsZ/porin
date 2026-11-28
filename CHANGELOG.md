@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RedisStore` (features `redis-tokio` and `redis-smol`): limiters shared by every instance through a single Redis server, a Sentinel-managed primary or a Cluster. Each decision is one Lua script that Redis runs atomically, timed by Redis's own clock; keys expire once idle. A sliding log is a sorted set per rate, so a decision costs a few lookups however many entries the window holds.
+- `Limiter::redis_builder`, which starts a limiter that keeps its state in a `RedisStore` under a limiter id. Keys need `KeyEncode`, and a key encoding to more than 512 bytes is refused with `Error::KeyTooLong`. Redis keys include the algorithm and a fingerprint of the quota, so changing either starts keys fresh.
+- Failure policies, one of which a Redis store requires: `FailOpen`, `FailClosed` and `Propagate`. After 3 failures in a row the store stops asking Redis for up to 5 s and answers by its policy at once; a Sentinel store then looks for a new primary. `CircuitBreaker` changes those numbers; once the open time passes, one call at a time probes Redis. Calls wait at most 100 ms by default. Errors that retrying won't fix, such as refused credentials or permissions, are `Error::Store` under every policy, and `connect` fails on them, and on a replica, by loading the scripts and making a test write. A store whose server turns replica connects again, so one reached by an address that moves on failover follows it.
+- `RedisStoreBuilder::primary_url`, for a Sentinel store only: the credentials, database and TLS (`rediss://`) that the Sentinel-managed primary needs, from a URL whose host is ignored. `RedisStore::sentinel` returns a `RedisStoreBuilder<_, ViaSentinel>`; the other builders are `RedisStoreBuilder<_, Direct>`, the default.
+- `Stats::is_known`, false when a store didn't answer, and `Denial::is_store_unavailable`.
+- `QuotaErrorKind::RefillTooLong`, for token buckets too slow to refill for a Redis store to count exactly (over about 71 years).
+- `Limiter` and `Builder` take the store as a last type parameter, defaulting to `Memory`, so existing code keeps compiling.
+
+### Changed
+
+- `Error` has its first variants: `Error::Store` and `Error::KeyTooLong`.
+- The `store` module is public, holding `Memory`, `RedisStore` and the failure policies.
+
 ## [0.1.0-alpha.1] - 2026-11-21
 
 First release, to reserve the name. The in-memory limiter is usable; the API may still change before 0.1.0.

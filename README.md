@@ -2,7 +2,7 @@
 
 Rate limiting for Rust services: several algorithms, shared storage, any framework.
 
-> **Status:** early development, not yet on crates.io. The in-memory limiter works; Redis, the tower layer and peer mode are next.
+> **Status:** early development. The in-memory and Redis limiters work; the tower layer and peer mode are next.
 
 A porin is a protein that forms a channel through a cell membrane and controls what passes. This crate does the same for requests.
 
@@ -26,10 +26,24 @@ if limiter.hit(&user_id).await?.is_allowed() {
 - **Memory safety under floods:** at most 1,000,000 tracked keys by default; idle keys are evicted, and you choose what happens when every key is active (`WhenFull`)
 - **Waiting:** `until_ready`, on any async runtime, and a blocking `Limiter` for code without one
 - **Clocks:** the system clock by default, `CoarseClock` for the fastest hits, `QuantaClock` (feature `quanta`), and `ManualClock` for tests
+- **Redis** (features `redis-tokio`, `redis-smol`): one limit shared by every instance, on a single server, Sentinel or Cluster. Each decision is one atomic Lua script timed by Redis's clock, and you choose what happens when Redis is down: `FailOpen`, `FailClosed` or `Propagate`
+
+```rust
+use porin::store::{FailClosed, RedisStore};
+use porin::{Limiter, quota};
+
+let redis = RedisStore::builder("redis://127.0.0.1/")
+    .on_failure(FailClosed)
+    .connect()
+    .await?;
+let limiter: Limiter<u64, _, _> = Limiter::redis_builder(&redis, "api")
+    .quota(quota!("100/minute"))
+    .build()?;
+```
 
 ## Planned
 
-- **Storage:** Redis, and in v0.2 **peer mode**, which enforces a global limit with no central store
+- **Storage:** in v0.2, **peer mode**, which enforces a global limit with no central store
 - **Frameworks:** a tower layer (axum, tonic, hyper), and actix in v0.2
 
 ## Prior art

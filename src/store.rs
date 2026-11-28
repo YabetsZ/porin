@@ -1,11 +1,95 @@
-//! Where limiter state lives.
+//! Where limiter state lives: [`Memory`] (the default), or a Redis server
+//! shared by every instance ([`RedisStore`], features `redis-tokio` and
+//! `redis-smol`).
 
 pub(crate) mod memory;
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub(crate) mod redis;
 
 use std::time::Duration;
 
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub use self::redis::breaker::CircuitBreaker;
+#[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
+pub use self::redis::{Direct, NoPolicy, RedisStore, RedisStoreBuilder, ViaSentinel};
 use crate::Quota;
 use crate::algorithm::{Outcome, Retry, Stats};
+
+/// Where a [`Limiter`](crate::Limiter) keeps its state: [`Memory`] or
+/// [`RedisStore`]. Sealed.
+pub trait Store: sealed::Store {}
+
+pub(crate) mod sealed {
+    use crate::Algorithm;
+
+    pub trait Store: 'static {
+        /// What a limiter holds for this store.
+        type Inner<K, A: Algorithm>;
+        /// What a builder holds for this store.
+        type Config;
+    }
+
+    pub trait FailurePolicy {
+        #[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
+        const POLICY: super::Policy;
+    }
+}
+
+/// The in-memory store, private to one process. The default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Memory;
+
+impl sealed::Store for Memory {
+    type Inner<K, A: crate::Algorithm> = crate::limiter::MemoryInner<K, A>;
+    type Config = crate::limiter::MemoryConfig;
+}
+
+impl Store for Memory {}
+
+/// What a remote store's limiter answers when the store fails or doesn't
+/// answer in time: [`FailOpen`], [`FailClosed`] or [`Propagate`]. There is
+/// no default, because each is wrong for some service. Sealed.
+pub trait FailurePolicy: sealed::FailurePolicy + Copy + Send + Sync + 'static {}
+
+/// Allow the hit when the store fails. The service stays up through a store
+/// outage, unprotected. The decision's stats are not
+/// [known](crate::Stats::is_known).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FailOpen;
+
+/// Deny the hit when the store fails. Nothing gets through unchecked, so a
+/// store outage takes the limited service down with it. The denial reports
+/// [`is_store_unavailable`](crate::Denial::is_store_unavailable).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FailClosed;
+
+/// Return the failure as [`Error::Store`](crate::Error::Store) and let the
+/// caller decide.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Propagate;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Policy {
+    Open,
+    Closed,
+    Propagate,
+}
+
+#[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
+impl sealed::FailurePolicy for FailOpen {
+    const POLICY: Policy = Policy::Open;
+}
+#[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
+impl sealed::FailurePolicy for FailClosed {
+    const POLICY: Policy = Policy::Closed;
+}
+#[expect(private_interfaces, reason = "sealed: outside crates can't name it")]
+impl sealed::FailurePolicy for Propagate {
+    const POLICY: Policy = Policy::Propagate;
+}
+impl FailurePolicy for FailOpen {}
+impl FailurePolicy for FailClosed {}
+impl FailurePolicy for Propagate {}
 
 /// What a store does with a new key when it has no room: every key it
 /// tracks is still active, and forgetting an active key resets its limit.
