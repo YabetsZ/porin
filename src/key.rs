@@ -113,6 +113,13 @@ impl KeyEncode for isize {
     }
 }
 
+/// The one key of a limiter with a single, global limit, such as a
+/// `Limiter<(), _, RedisStore<_>>` shared by every instance. It encodes to
+/// nothing.
+impl KeyEncode for () {
+    fn encode_key(&self, _out: &mut Vec<u8>) {}
+}
+
 impl KeyEncode for bool {
     fn encode_key(&self, out: &mut Vec<u8>) {
         out.push(u8::from(*self));

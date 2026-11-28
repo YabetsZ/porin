@@ -25,6 +25,7 @@ use crate::algorithm::{Outcome, Spec, Unit, check_quota_in};
 use crate::quota::MAX_RATES;
 use crate::{FixedWindow, Quota, Rate, SlidingLog, SlidingWindow, TokenBucket};
 
+mod global;
 mod limiter;
 
 /// A Redis to test against: one this test started, or one it was given.

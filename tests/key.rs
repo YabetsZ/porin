@@ -144,3 +144,9 @@ fn encodings_are_stable() {
         assert_eq!(actual, expected, "{name}");
     }
 }
+
+#[test]
+fn the_unit_key_encodes_to_nothing() {
+    use porin::KeyEncode;
+    assert_eq!(().key_bytes(), Vec::<u8>::new());
+}
