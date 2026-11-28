@@ -1,5 +1,5 @@
 //! Where limiter state lives: [`Memory`] (the default), or a Redis server
-//! shared by every instance ([`RedisStore`], features `redis-tokio` and
+//! shared by every instance (`RedisStore`, features `redis-tokio` and
 //! `redis-smol`).
 
 pub(crate) mod memory;
@@ -20,7 +20,7 @@ use crate::Quota;
 use crate::algorithm::{Outcome, Retry, Stats};
 
 /// Where a [`Limiter`](crate::Limiter) keeps its state: [`Memory`] or
-/// [`RedisStore`]. Sealed.
+/// `RedisStore`. Sealed.
 pub trait Store: sealed::Store {}
 
 pub(crate) mod sealed {

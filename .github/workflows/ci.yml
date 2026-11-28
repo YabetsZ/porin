@@ -72,6 +72,10 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
+      # Links to feature-gated items break a plain `cargo doc`.
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   features:
     runs-on: ubuntu-latest

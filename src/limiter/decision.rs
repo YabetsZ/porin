@@ -92,7 +92,7 @@ impl Decision {
         })
     }
 
-    /// The answer of [`FailOver`](crate::store::FailOver)'s fallback
+    /// The answer of `FailOver`'s fallback
     /// limiter: its decision, with stats marked as the fallback's.
     #[cfg(any(feature = "redis-tokio", feature = "redis-smol"))]
     pub(crate) fn from_fallback(hit: Hit) -> Self {
@@ -125,7 +125,7 @@ enum Source {
     Store,
     /// Nobody: a remote store didn't answer and the failure policy did.
     Policy,
-    /// [`FailOver`](crate::store::FailOver)'s per-instance fallback limiter.
+    /// `FailOver`'s per-instance fallback limiter.
     #[cfg_attr(
         not(any(feature = "redis-tokio", feature = "redis-smol")),
         expect(dead_code, reason = "only a Redis store has a fallback")
@@ -152,7 +152,7 @@ impl Stats {
 
     /// Whether the limiter's store reported these stats. False when a
     /// remote store didn't answer and the limiter decided by its failure
-    /// policy, including [`FailOver`](crate::store::FailOver)'s fallback;
+    /// policy, including `FailOver`'s fallback;
     /// skip `RateLimit-*` headers then, since they would describe the
     /// limiter's quota.
     #[must_use]
@@ -161,7 +161,7 @@ impl Stats {
     }
 
     /// Whether a remote store didn't answer and
-    /// [`FailOver`](crate::store::FailOver)'s per-instance fallback limiter
+    /// `FailOver`'s per-instance fallback limiter
     /// decided instead. [`remaining`](Self::remaining) and
     /// [`reset_after`](Self::reset_after) are then the fallback's, for its
     /// smaller quota on this instance alone.
